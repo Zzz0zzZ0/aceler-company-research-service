@@ -1,0 +1,4 @@
+interface:
+  display_name: "Aceler 企业背调"
+  short_description: "核查公司角色、生产工艺、采购方向与 Aceler 产品匹配度"
+  default_prompt: "Use $aceler-company-research to research this company and assess its fit with Aceler products using current sources."
