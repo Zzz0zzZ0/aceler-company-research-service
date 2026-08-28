@@ -313,12 +313,21 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertEqual(first["result"], (200, {"run_id": "20260819T020000Z", "status": "completed", "exit_code": 0}))
 
     def test_html_has_manual_research_form_and_refresh(self) -> None:
+        self.assertIn('id="research-open"', HTML)
+        self.assertIn('id="research-drawer"', HTML)
+        self.assertIn('id="research-close"', HTML)
+        self.assertIn('role="dialog"', HTML)
+        self.assertIn('aria-modal="true"', HTML)
+        self.assertIn("containDrawerFocus", HTML)
+        self.assertIn("$('app-shell').inert = true", HTML)
         self.assertIn('id="research-form"', HTML)
         self.assertIn('id="research-name"', HTML)
         self.assertIn('id="research-website"', HTML)
         self.assertIn('id="research-linkedin"', HTML)
         self.assertIn("/api/research", HTML)
         self.assertIn("loadRun(body.run_id)", HTML)
+        self.assertIn("openResearch", HTML)
+        self.assertIn("closeResearch", HTML)
 
 
 if __name__ == "__main__":

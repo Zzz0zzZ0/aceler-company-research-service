@@ -5,3 +5,4 @@ config/local.env
 inputs/
 outputs/
 .venv/
+.impeccable/

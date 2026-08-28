@@ -565,158 +565,270 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#fafafb">
   <title>Aceler 背调看板</title>
   <style>
-    :root { color-scheme: light; --ink:#182332; --muted:#607083; --line:#dbe3eb; --panel:#fff; --wash:#f4f7fa; --blue:#1769aa; --bluewash:#e9f3fb; --green:#176b45; --greenwash:#e8f5ee; --amber:#8a5a00; --amberwash:#fff5da; --red:#9b2c2c; --redwash:#fff0f0; }
+    :root { color-scheme:light; --ground:#fafafb; --surface:#fff; --ink:#16161b; --muted:#626368; --quiet:#6f7178; --line:#e6e8ed; --line-strong:#cdd2dc; --blue:#104eec; --blue-soft:#eef3ff; --coral:#e36965; --coral-soft:#fff2f1; --success:#177245; --success-soft:#edf8f2; --amber:#a46100; --amber-soft:#fff7e7; --drawer:400px; }
     * { box-sizing:border-box; }
-    body { margin:0; background:var(--wash); color:var(--ink); font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
-    a { color:var(--blue); }
-    .shell { max-width:1440px; margin:0 auto; padding:24px; }
-    header { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:20px; }
+    html { background:var(--ground); }
+    body { margin:0; min-width:320px; background:var(--ground); color:var(--ink); font:14px/1.55 "Avenir Next","PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif; text-rendering:optimizeLegibility; }
+    ::selection { background:#cbd8ff; color:#071d5e; }
+    :focus-visible { outline:3px solid rgb(16 78 236 / 28%); outline-offset:2px; }
+    button,input,select { font:inherit; }
+    button,select { cursor:pointer; }
+    button:disabled { cursor:wait; opacity:.58; }
+    a { color:var(--blue); text-decoration-thickness:1px; text-underline-offset:3px; }
     h1,h2,h3,p { margin:0; }
-    h1 { font-size:clamp(24px,3vw,34px); letter-spacing:-.02em; }
-    .subtle { color:var(--muted); }
-    .stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:16px; }
-    .card,.panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; box-shadow:0 2px 12px rgb(30 55 80 / 4%); }
-    .stat { padding:16px; }
-    .stat strong { display:block; font-size:26px; line-height:1.2; margin-top:4px; }
-    .stat.valid strong { color:var(--green); } .stat.failed strong { color:var(--red); }
-    .research-form { padding:16px; margin-bottom:16px; }
-    .research-form h2 { font-size:18px; margin-bottom:4px; }
-    .research-form p { margin-bottom:12px; }
-    .form-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
-    .form-field { display:grid; gap:5px; }
-    .form-field input { min-width:0; width:100%; }
-    .form-actions { display:flex; align-items:center; gap:12px; margin-top:12px; }
-    button[type="submit"] { min-height:40px; border:1px solid var(--blue); border-radius:8px; padding:8px 16px; color:#fff; background:var(--blue); font:inherit; font-weight:700; cursor:pointer; }
-    button[type="submit"]:disabled { opacity:.6; cursor:wait; }
-    .toolbar { display:flex; flex-wrap:wrap; gap:10px; padding:14px; align-items:center; }
-    label { font-weight:600; }
-    select,input { min-height:40px; border:1px solid #b9c5d2; border-radius:8px; padding:8px 10px; color:var(--ink); background:#fff; font:inherit; }
-    input { min-width:220px; flex:1 1 250px; }
-    .content { display:grid; grid-template-columns:minmax(390px,1fr) minmax(420px,1.25fr); gap:16px; align-items:start; }
-    .list-panel { overflow:hidden; }
-    .list-header { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:10px; }
-    .company-list { display:grid; }
-    .company-row { appearance:none; width:100%; border:0; border-bottom:1px solid var(--line); background:#fff; color:inherit; text-align:left; padding:14px 16px; cursor:pointer; }
-    .company-row:hover,.company-row:focus-visible { background:#f0f6fb; outline:none; }
-    .company-row.selected { box-shadow:inset 4px 0 var(--blue); background:var(--bluewash); }
-    .row-top,.row-bottom { display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
-    .row-top strong { overflow-wrap:anywhere; }
-    .row-bottom { color:var(--muted); font-size:13px; margin-top:6px; flex-wrap:wrap; }
-    .badges { display:flex; gap:5px; flex-wrap:wrap; }
-    .badge { display:inline-flex; align-items:center; min-height:24px; border:1px solid currentColor; border-radius:999px; padding:1px 8px; font-size:12px; font-weight:700; white-space:nowrap; }
-    .badge.valid { color:var(--green); background:var(--greenwash); } .badge.failed { color:var(--red); background:var(--redwash); }
-    .badge.match-high { color:var(--green); background:var(--greenwash); } .badge.match-medium { color:#1e5c91; background:var(--bluewash); } .badge.match-low { color:var(--amber); background:var(--amberwash); } .badge.match-none { color:var(--muted); background:#f3f5f7; }
-    .detail { padding:20px; min-height:500px; }
-    .detail-title { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:18px; }
-    .detail-title h2 { overflow-wrap:anywhere; }
-    .detail-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-    .module { border:1px solid var(--line); border-radius:10px; padding:14px; background:#fff; }
-    .module.full { grid-column:1/-1; }
-    .module h3 { font-size:16px; margin-bottom:8px; }
-    .module p { white-space:pre-wrap; overflow-wrap:anywhere; }
-    .kv { display:grid; grid-template-columns:110px 1fr; gap:5px 12px; margin:0; }
-    .kv dt { color:var(--muted); } .kv dd { margin:0; overflow-wrap:anywhere; }
-    .direction { padding:10px 0; border-top:1px solid var(--line); } .direction:first-child { border-top:0; padding-top:0; }
-    .direction strong { display:inline-block; margin-right:8px; }
-    details { margin-top:14px; border-top:1px solid var(--line); padding-top:12px; }
-    summary { cursor:pointer; font-weight:700; }
-    .source-list,.error-list { display:grid; gap:6px; margin:8px 0 0; padding-left:20px; }
-    .empty { padding:34px 16px; color:var(--muted); text-align:center; }
-    .error { color:var(--red); }
     .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
-    @media (max-width:900px) { .content { grid-template-columns:1fr; } .detail { min-height:0; } }
-    @media (max-width:900px) { .form-grid { grid-template-columns:1fr 1fr; } .form-field:first-child { grid-column:1/-1; } }
-    @media (max-width:560px) { .shell { padding:14px; } header { display:block; } .stats { grid-template-columns:repeat(2,1fr); } .detail-grid { grid-template-columns:1fr; } .module.full { grid-column:auto; } .kv { grid-template-columns:100px 1fr; } .form-grid { grid-template-columns:1fr; } .form-field:first-child { grid-column:auto; } .form-actions { align-items:flex-start; flex-direction:column; } }
+    .subtle { color:var(--muted); }
+    .mono,.stat-value,.score-value,.row-score { font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace; font-variant-numeric:tabular-nums; }
+    .app { height:100vh; min-height:620px; display:grid; grid-template-rows:64px minmax(0,1fr); overflow:hidden; }
+    .app-header { display:grid; grid-template-columns:auto minmax(420px,1fr) auto; align-items:center; gap:28px; min-width:0; padding:0 24px; border-bottom:1px solid var(--line); background:rgb(250 250 251 / 94%); position:relative; z-index:20; }
+    .brand { display:flex; align-items:baseline; gap:12px; white-space:nowrap; }
+    .brand strong { font-size:24px; line-height:1; letter-spacing:-.04em; }
+    .brand span { font-size:15px; font-weight:700; }
+    .run-strip { display:flex; align-items:center; gap:18px; min-width:0; }
+    .run-field { display:flex; align-items:center; gap:8px; min-width:0; }
+    .run-field label,.stat-label { color:var(--muted); font-size:12px; font-weight:600; white-space:nowrap; }
+    .run-field select { width:min(320px,27vw); min-height:36px; border:1px solid var(--line-strong); border-radius:5px; padding:6px 30px 6px 10px; color:var(--ink); background:var(--surface); }
+    .header-stat { display:flex; align-items:baseline; gap:6px; white-space:nowrap; }
+    .stat-value { font-size:17px; font-weight:750; }
+    .header-stat.valid .stat-value { color:var(--success); }
+    .header-stat.failed .stat-value { color:var(--coral); }
+    #load-status { min-width:0; max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--quiet); font-size:12px; }
+    .primary-action { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:38px; padding:8px 15px; border:1px solid var(--blue); border-radius:5px; background:var(--blue); color:#fff; font-weight:750; box-shadow:0 4px 12px rgb(16 78 236 / 18%); }
+    .primary-action:hover { background:#0c42cb; }
+    .primary-action svg,.icon-button svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+    .workspace { min-height:0; display:grid; grid-template-columns:minmax(330px,31%) minmax(0,1fr); }
+    .queue { min-width:0; min-height:0; display:grid; grid-template-rows:auto auto minmax(0,1fr); border-right:1px solid var(--line); background:var(--surface); }
+    .queue-header { display:flex; justify-content:space-between; align-items:baseline; gap:16px; padding:20px 22px 14px; }
+    .queue-header h1 { font-size:19px; letter-spacing:-.02em; }
+    #list-count { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+    .queue-tools { display:grid; grid-template-columns:minmax(0,1fr) 112px; gap:8px; padding:0 22px 16px; border-bottom:1px solid var(--line); }
+    .search-wrap { position:relative; }
+    .search-wrap svg { position:absolute; left:11px; top:50%; width:16px; height:16px; transform:translateY(-50%); fill:none; stroke:var(--quiet); stroke-width:1.8; pointer-events:none; }
+    input,select { width:100%; min-height:40px; border:1px solid var(--line-strong); border-radius:5px; padding:8px 10px; background:var(--surface); color:var(--ink); }
+    .search-wrap input { padding-left:36px; }
+    input::placeholder { color:#74767d; }
+    .company-list { min-height:0; overflow:auto; scrollbar-color:#bcc2cc transparent; scrollbar-width:thin; }
+    .company-row { appearance:none; width:100%; display:grid; gap:7px; border:0; border-bottom:1px solid var(--line); padding:13px 22px; background:var(--surface); color:inherit; text-align:left; position:relative; }
+    .company-row:hover { background:#f7f9fd; }
+    .company-row.selected { background:var(--blue-soft); }
+    .company-row.selected::before { content:""; position:absolute; inset:0 auto 0 0; width:3px; background:var(--blue); }
+    .row-top,.row-meta { display:flex; justify-content:space-between; align-items:center; gap:14px; min-width:0; }
+    .row-name { min-width:0; overflow-wrap:anywhere; font-size:14px; font-weight:700; letter-spacing:-.01em; }
+    .row-score { flex:0 0 auto; color:var(--blue); font-weight:750; }
+    .row-meta { color:var(--muted); font-size:12px; }
+    .row-context { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .status-text { display:inline-flex; align-items:center; gap:6px; flex:0 0 auto; font-weight:650; }
+    .status-text::before { content:""; width:7px; height:7px; border:1px solid currentColor; border-radius:50%; background:currentColor; }
+    .status-text.valid { color:var(--success); }
+    .status-text.failed { color:var(--coral); }
+    .detail { min-width:0; min-height:0; overflow:auto; padding:30px clamp(24px,3.4vw,54px) 48px; scrollbar-color:#bcc2cc transparent; scrollbar-width:thin; }
+    .detail-empty { min-height:60vh; display:grid; place-items:center; text-align:center; color:var(--muted); }
+    .detail-title { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:28px; align-items:end; padding-bottom:24px; border-bottom:1px solid var(--line-strong); }
+    .detail-title h2 { max-width:24ch; overflow-wrap:anywhere; font-size:clamp(26px,3vw,38px); line-height:1.16; letter-spacing:-.038em; text-wrap:balance; }
+    .detail-meta { margin-top:8px; color:var(--muted); }
+    .summary-metrics { display:flex; gap:26px; align-items:stretch; }
+    .summary-metric { min-width:104px; padding-left:18px; border-left:1px solid var(--line); }
+    .summary-metric span { display:block; color:var(--muted); font-size:12px; font-weight:650; }
+    .summary-metric strong { display:block; margin-top:4px; font-size:24px; line-height:1; }
+    .score-value { color:var(--blue); }
+    .detail-grid { display:grid; grid-template-columns:1fr 1fr; column-gap:clamp(26px,4vw,58px); }
+    .module { min-width:0; padding:26px 0 28px; border-bottom:1px solid var(--line); }
+    .module h3 { display:flex; align-items:center; gap:9px; margin-bottom:13px; font-size:17px; line-height:1.3; letter-spacing:-.015em; }
+    .module h3::before { content:""; width:3px; height:18px; border-radius:2px; background:var(--blue); }
+    .module p { max-width:74ch; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .module p + p,.module .kv + p { margin-top:12px; }
+    .kv { display:grid; grid-template-columns:104px minmax(0,1fr); gap:7px 15px; margin:0; }
+    .kv dt { color:var(--muted); }
+    .kv dd { min-width:0; margin:0; overflow-wrap:anywhere; font-weight:550; }
+    .match-line { display:flex; align-items:baseline; gap:9px; margin-bottom:15px; }
+    .match-line strong { color:var(--blue); font-size:36px; line-height:1; letter-spacing:-.04em; }
+    .match-line span { color:var(--muted); }
+    .component-bars { display:grid; gap:8px; margin:16px 0; }
+    .component-bar { display:grid; grid-template-columns:118px minmax(70px,1fr) 30px; gap:10px; align-items:center; color:var(--muted); font-size:12px; }
+    .bar-track { height:3px; background:#e4e7ed; overflow:hidden; }
+    .bar-fill { display:block; height:100%; background:var(--blue); }
+    .direction { padding:12px 0; border-top:1px solid var(--line); }
+    .direction:first-of-type { padding-top:0; border-top:0; }
+    .direction-head { display:flex; justify-content:space-between; gap:12px; margin-bottom:6px; }
+    .direction-head strong { overflow-wrap:anywhere; }
+    .tag { display:inline-flex; align-items:center; min-height:22px; padding:1px 7px; border-radius:999px; background:#eef0f4; color:#4f5158; font-size:11px; font-weight:750; white-space:nowrap; }
+    .tag.high,.tag.valid { background:var(--success-soft); color:var(--success); }
+    .tag.medium { background:var(--blue-soft); color:#244fa6; }
+    .tag.low { background:var(--amber-soft); color:var(--amber); }
+    .tag.failed { background:var(--coral-soft); color:#b33e3a; }
+    .auxiliary { margin-top:0; padding:24px 0; border-bottom:1px solid var(--line); }
+    .auxiliary summary { cursor:pointer; list-style:none; display:flex; justify-content:space-between; gap:20px; font-size:16px; font-weight:750; }
+    .auxiliary summary::-webkit-details-marker { display:none; }
+    .auxiliary summary::after { content:"＋"; color:var(--blue); font-size:18px; font-weight:500; }
+    .auxiliary[open] summary::after { content:"−"; }
+    .aux-grid { display:grid; grid-template-columns:1fr 1fr; gap:28px 48px; padding-top:22px; }
+    .aux-block h3 { margin-bottom:9px; font-size:13px; }
+    .source-list,.error-list { display:grid; gap:7px; margin:0; padding-left:18px; }
+    .error { color:#b33e3a; }
+    .empty { padding:44px 22px; color:var(--muted); text-align:center; }
+    .drawer-backdrop { position:fixed; inset:64px 0 0; z-index:28; background:rgb(13 20 37 / 22%); opacity:0; transition:opacity 180ms cubic-bezier(.22,1,.36,1); pointer-events:none; }
+    .drawer-backdrop.open { opacity:1; pointer-events:auto; }
+    .research-drawer { position:fixed; z-index:30; inset:64px 0 0 auto; width:min(var(--drawer),100vw); display:grid; grid-template-rows:auto minmax(0,1fr); border-left:1px solid var(--line-strong); background:var(--surface); box-shadow:-18px 0 48px rgb(21 29 49 / 14%); transform:translateX(102%); visibility:hidden; transition:transform 180ms cubic-bezier(.22,1,.36,1),visibility 0s linear 180ms; }
+    .research-drawer.open { transform:translateX(0); visibility:visible; transition-delay:0s; }
+    .drawer-header { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; padding:24px 24px 18px; border-bottom:1px solid var(--line); }
+    .drawer-header h2 { font-size:21px; letter-spacing:-.025em; }
+    .drawer-header p { margin-top:4px; color:var(--muted); font-size:12px; }
+    .icon-button { display:inline-grid; place-items:center; width:38px; height:38px; border:1px solid var(--line); border-radius:5px; background:var(--surface); color:var(--ink); }
+    .drawer-body { overflow:auto; padding:24px; }
+    .form-grid { display:grid; gap:18px; }
+    .form-field { display:grid; gap:7px; font-weight:700; }
+    .field-note { color:var(--quiet); font-size:11px; font-weight:500; }
+    .form-actions { display:grid; gap:12px; margin-top:26px; }
+    .form-actions .primary-action { width:100%; min-height:44px; }
+    #research-status { min-height:44px; color:var(--muted); font-size:12px; }
+    @media (max-width:1080px) {
+      .app-header { grid-template-columns:auto 1fr auto; gap:16px; padding-inline:18px; }
+      .run-strip { gap:12px; }
+      .run-field select { width:220px; }
+      #load-status { display:none; }
+      .workspace { grid-template-columns:minmax(320px,38%) minmax(0,1fr); }
+      .detail { padding-inline:28px; }
+      .detail-grid { grid-template-columns:1fr; }
+      .detail-title { grid-template-columns:1fr; align-items:start; }
+      .summary-metrics { justify-content:flex-start; }
+    }
+    @media (max-width:760px) {
+      .app { display:block; height:auto; min-height:100vh; overflow:visible; }
+      .app-header { min-height:112px; grid-template-columns:1fr auto; align-content:center; gap:12px; padding:14px 16px; position:sticky; top:0; }
+      .run-strip { grid-column:1/-1; display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:10px; }
+      .run-field label { display:none; }
+      .run-field select { width:100%; }
+      .header-stat.selected { display:none; }
+      .workspace { display:block; }
+      .queue { min-height:0; max-height:56vh; border-right:0; border-bottom:1px solid var(--line-strong); }
+      .company-list { max-height:38vh; }
+      .detail { overflow:visible; padding:24px 18px 42px; }
+      .detail-title h2 { font-size:28px; }
+      .aux-grid { grid-template-columns:1fr; }
+      .drawer-backdrop { inset:0; }
+      .research-drawer { inset:0 0 0 auto; width:min(420px,100vw); }
+    }
+    @media (max-width:480px) {
+      .brand strong { font-size:22px; }
+      .brand span { display:none; }
+      .primary-action { padding-inline:12px; }
+      .queue-header,.queue-tools,.company-row { padding-left:16px; padding-right:16px; }
+      .queue-tools { grid-template-columns:1fr 104px; }
+      .summary-metrics { width:100%; gap:0; }
+      .summary-metric { flex:1; min-width:0; }
+      .component-bar { grid-template-columns:100px minmax(50px,1fr) 28px; }
+    }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition-duration:.01ms!important; } }
   </style>
 </head>
 <body>
-  <main class="shell">
-    <header>
-      <div><h1>Aceler 背调看板</h1><p class="subtle">浏览本地背调运行结果 · 纯匹配度与证据置信度分开展示</p></div>
-      <p id="load-status" class="subtle" role="status" aria-live="polite">正在加载…</p>
+  <!--
+  THESIS: 结果审阅优先，拒绝统计卡堆叠；主张、证据和推断在同一视野对齐。
+  OWN-WORLD: #FAFAFB 近白画布、#16161B 编辑墨色、钴蓝选区、珊瑚异常和发丝分隔线。
+  STORY: 选择批次，扫描公司，核对四项判断与来源；需要时从顶栏打开单家公司背调。
+  FIRST VIEWPORT: 64px 状态栏，左侧约 31% 公司队列，右侧研究正文，右侧抽屉按需覆盖。
+  FORM: 事实核验编辑台，七项候选中的第六项；seed 20897b8c。
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+  -->
+  <main id="app-shell" class="app">
+    <header class="app-header">
+      <div class="brand"><strong>Aceler</strong><span>背调看板</span></div>
+      <div class="run-strip" aria-label="当前运行状态">
+        <div class="run-field"><label for="run-select">运行批次</label><select id="run-select" aria-label="运行批次"></select></div>
+        <div class="header-stat selected"><span class="stat-label">公司</span><strong id="stat-selected" class="stat-value">—</strong></div>
+        <div class="header-stat valid"><span class="stat-label">有效</span><strong id="stat-valid" class="stat-value">—</strong></div>
+        <div class="header-stat failed"><span class="stat-label">失败</span><strong id="stat-failed" class="stat-value">—</strong></div>
+        <p id="load-status" role="status" aria-live="polite">正在加载…</p>
+      </div>
+      <button id="research-open" class="primary-action" type="button" aria-expanded="false" aria-controls="research-drawer"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建背调</button>
     </header>
-    <section class="panel research-form" aria-labelledby="research-title">
-      <h2 id="research-title">单家公司背调</h2>
-      <p class="subtle">输入公司名，官网和 LinkedIn 可选；结果会生成新的运行批次。</p>
-      <form id="research-form">
-        <div class="form-grid">
-          <label class="form-field" for="research-name">公司名（必填）<input id="research-name" name="name" type="text" maxlength="400" autocomplete="organization" required></label>
-          <label class="form-field" for="research-website">官网（可选）<input id="research-website" name="website" type="url" maxlength="2000" placeholder="https://example.com" autocomplete="url"></label>
-          <label class="form-field" for="research-linkedin">LinkedIn（可选）<input id="research-linkedin" name="linkedin_url" type="url" maxlength="2000" placeholder="https://www.linkedin.com/company/..." autocomplete="url"></label>
+    <section class="workspace" aria-label="背调结果工作区">
+      <aside class="queue" aria-labelledby="queue-title">
+        <div class="queue-header"><h1 id="queue-title">公司列表</h1><span id="list-count" aria-live="polite">—</span></div>
+        <div class="queue-tools" aria-label="筛选条件">
+          <label class="search-wrap" for="search"><span class="sr-only">搜索公司</span><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="search" type="search" placeholder="搜索公司、行业或角色"></label>
+          <label for="status-select"><span class="sr-only">状态筛选</span><select id="status-select"><option value="all">全部状态</option><option value="valid">有效</option><option value="failed">失败</option></select></label>
         </div>
-        <div class="form-actions"><button id="research-submit" type="submit">开始背调</button><span id="research-status" class="subtle" role="status" aria-live="polite"></span></div>
-      </form>
-    </section>
-    <section class="stats" aria-label="运行统计">
-      <div class="card stat"><span class="subtle">当前运行公司</span><strong id="stat-selected">—</strong></div>
-      <div class="card stat valid"><span>有效</span><strong id="stat-valid">—</strong></div>
-      <div class="card stat failed"><span>失败</span><strong id="stat-failed">—</strong></div>
-    </section>
-    <section class="panel toolbar" aria-label="筛选条件">
-      <label for="run-select">运行批次</label><select id="run-select"></select>
-      <label for="search" class="sr-only">搜索公司</label><input id="search" type="search" placeholder="搜索公司名、行业或角色…">
-      <label for="status-select" class="sr-only">状态筛选</label><select id="status-select"><option value="all">全部状态</option><option value="valid">有效</option><option value="failed">失败</option></select>
-    </section>
-    <section class="content">
-      <div class="panel list-panel"><div class="list-header"><h2>公司列表</h2><span id="list-count" class="subtle" aria-live="polite">—</span></div><div id="company-list" class="company-list"></div></div>
-      <article id="detail" class="panel detail" aria-live="polite"><div class="empty">选择左侧公司查看背调详情。</div></article>
+        <div id="company-list" class="company-list"></div>
+      </aside>
+      <article id="detail" class="detail" aria-live="polite"><div class="detail-empty">选择左侧公司查看背调详情。</div></article>
     </section>
   </main>
+  <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside id="research-drawer" class="research-drawer" role="dialog" aria-modal="true" aria-labelledby="research-title" aria-hidden="true">
+    <div class="drawer-header"><div><h2 id="research-title">新建背调</h2><p>结果将保存为一个新的运行批次</p></div><button id="research-close" class="icon-button" type="button" aria-label="关闭新建背调"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div class="drawer-body">
+      <form id="research-form">
+        <div class="form-grid">
+          <label class="form-field" for="research-name">公司名 <span class="field-note">必填</span><input id="research-name" name="name" type="text" maxlength="400" autocomplete="organization" required placeholder="输入公司全称"></label>
+          <label class="form-field" for="research-website">官网 <span class="field-note">可选</span><input id="research-website" name="website" type="url" maxlength="2000" placeholder="https://example.com" autocomplete="url"></label>
+          <label class="form-field" for="research-linkedin">LinkedIn <span class="field-note">可选</span><input id="research-linkedin" name="linkedin_url" type="url" maxlength="2000" placeholder="https://www.linkedin.com/company/..." autocomplete="url"></label>
+        </div>
+        <div class="form-actions"><button id="research-submit" class="primary-action" type="submit">开始背调</button><span id="research-status" role="status" aria-live="polite"></span></div>
+      </form>
+    </div>
+  </aside>
   <script>
     const state = { runs: [], run: null, selected: null };
     const $ = id => document.getElementById(id);
     const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;', '"':'&quot;'}[c]));
-    const display = value => value || '未填写';
-    const scoreText = item => item.score === null || item.score === undefined ? '未评分' : `${esc(item.score)}% · ${esc(item.level || '未评分')}`;
-    const matchClass = level => /高/.test(level || '') ? 'match-high' : /中/.test(level || '') ? 'match-medium' : /低/.test(level || '') ? 'match-low' : 'match-none';
-    const statusBadge = item => `<span class="badge ${esc(item.status)}">${esc(item.status_label || item.status)}</span>`;
+    const scoreValue = item => item.score === null || item.score === undefined ? '—' : esc(item.score);
+    const statusText = item => `<span class="status-text ${esc(item.status)}">${esc(item.status_label || item.status)}</span>`;
+    const matchClass = value => /高/.test(value || '') ? 'high' : /中/.test(value || '') ? 'medium' : /低/.test(value || '') ? 'low' : '';
+    const tag = (value, extra = '') => `<span class="tag ${extra || matchClass(value)}">${esc(value || '未确认')}</span>`;
     const link = item => item.url ? `<a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title || item.url)}</a>` : '';
-    function setStats(stats) { ['selected','valid','failed'].forEach(k => $(`stat-${k}`).textContent = stats?.[k] ?? 0); }
+    const componentLabels = { production_process_need:'生产工艺需求', catalog_fit:'产品目录匹配', consumption_intensity:'消耗强度', demand_recurrence:'需求复购', company_role_fit:'角色适配' };
+    function setStats(stats) { ['selected','valid','failed'].forEach(key => $(`stat-${key}`).textContent = stats?.[key] ?? 0); }
     async function json(path) { const response = await fetch(path); if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); }
-    function renderRunOptions() {
-      $('run-select').innerHTML = state.runs.length ? state.runs.map(run => `<option value="${esc(run.run_id)}">${esc(run.label)}（${run.stats.selected}家公司）</option>`).join('') : '<option>暂无运行结果</option>';
-    }
+    function renderRunOptions() { $('run-select').innerHTML = state.runs.length ? state.runs.map(run => `<option value="${esc(run.run_id)}">${esc(run.label)} · ${run.stats.selected} 家</option>`).join('') : '<option>暂无运行结果</option>'; }
     function filtered() {
       const query = $('search').value.trim().toLowerCase(), status = $('status-select').value;
       return (state.run?.companies || []).filter(item => {
-        const hay = [item.name,item.industry,item.operational_role,item.commercial_relationship].join(' ').toLowerCase();
-        return (!query || hay.includes(query)) && (status === 'all' || item.status === status);
+        const haystack = [item.name,item.industry,item.operational_role,item.commercial_relationship].join(' ').toLowerCase();
+        return (!query || haystack.includes(query)) && (status === 'all' || item.status === status);
       });
     }
     function renderList() {
-      const items = filtered(); $('list-count').textContent = `${items.length} / ${state.run?.companies?.length || 0}`;
-      $('company-list').innerHTML = items.length ? items.map(item => `<button class="company-row ${state.selected?.record_id === item.record_id ? 'selected' : ''}" data-id="${esc(item.record_id)}" type="button"><span class="row-top"><strong>${esc(item.name)}</strong><span class="badges">${statusBadge(item)}<span class="badge ${matchClass(item.level)}">${scoreText(item)}</span></span></span><span class="row-bottom"><span>${esc(item.industry)} · ${esc(item.operational_role)} · ${esc(item.commercial_relationship)}</span><span>置信度 ${esc(item.confidence)} · 准入 ${esc(item.entry_barrier)} · ${item.duration_seconds == null ? '耗时未知' : `${esc(item.duration_seconds)}s`}</span></span></button>`).join('') : '<div class="empty">没有符合条件的公司。</div>';
-      document.querySelectorAll('.company-row').forEach(button => button.addEventListener('click', () => { state.selected = (state.run.companies || []).find(item => item.record_id === button.dataset.id) || null; renderList(); renderDetail(); }));
+      const items = filtered(), total = state.run?.companies?.length || 0;
+      $('list-count').textContent = `${items.length} / ${total}`;
+      $('company-list').innerHTML = items.length ? items.map(item => `<button class="company-row ${state.selected?.record_id === item.record_id ? 'selected' : ''}" data-id="${esc(item.record_id)}" type="button" aria-pressed="${state.selected?.record_id === item.record_id}"><span class="row-top"><span class="row-name">${esc(item.name)}</span><span class="row-score">${scoreValue(item)}</span></span><span class="row-meta"><span class="row-context">${esc(item.industry)} · ${esc(item.operational_role)} · ${esc(item.commercial_relationship)}</span>${statusText(item)}</span></button>`).join('') : '<div class="empty">没有符合当前条件的公司。请调整搜索词或状态筛选。</div>';
+      document.querySelectorAll('.company-row').forEach(button => button.addEventListener('click', () => { state.selected = (state.run.companies || []).find(item => item.record_id === button.dataset.id) || null; renderList(); renderDetail(); if (matchMedia('(max-width:760px)').matches) $('detail').scrollIntoView({behavior:'smooth',block:'start'}); }));
     }
     function renderDetail() {
       const item = state.selected, detail = $('detail');
-      if (!item) { detail.innerHTML = '<div class="empty">选择左侧公司查看背调详情。</div>'; return; }
-      const a = item.assessment, crm = item.crm_record || {}, pos = a?.company_positioning, role = a?.role_judgment, match = a?.match;
-      const directionHtml = a?.procurement_directions?.length ? a.procurement_directions.map(d => `<div class="direction"><strong>${esc(d.product || '未填写')}</strong><span class="badge ${matchClass(d.priority)}">${esc(d.priority || '未定')}</span><p>${esc(d.application || '')}</p>${d.basis ? `<p class="subtle">依据：${esc(d.basis)}</p>` : ''}${d.evidence_status ? `<p class="subtle">证据状态：${esc(d.evidence_status)}</p>` : ''}${d.next_question ? `<p class="subtle">下一步：${esc(d.next_question)}</p>` : ''}</div>`).join('') : '<p class="subtle">未形成采购方向。</p>';
-      const sources = a?.sources?.length ? `<ul class="source-list">${a.sources.map(link).map(x => `<li>${x}</li>`).join('')}</ul>` : '<p class="subtle">暂无来源链接。</p>';
+      if (!item) { detail.innerHTML = '<div class="detail-empty">选择左侧公司查看背调详情。</div>'; return; }
+      const assessment = item.assessment, crm = item.crm_record || {}, pos = assessment?.company_positioning, role = assessment?.role_judgment, match = assessment?.match;
+      const components = Object.entries(match?.components || {});
+      const componentHtml = components.length ? `<div class="component-bars">${components.map(([key,value]) => `<div class="component-bar"><span>${esc(componentLabels[key] || key)}</span><span class="bar-track"><span class="bar-fill" style="width:${Math.max(0,Math.min(100,Number(value) || 0))}%"></span></span><strong class="mono">${esc(value)}</strong></div>`).join('')}</div>` : '';
+      const directionHtml = assessment?.procurement_directions?.length ? assessment.procurement_directions.map(direction => `<div class="direction"><div class="direction-head"><strong>${esc(direction.product || '未填写')}</strong>${tag(direction.priority || '未定')}</div><p>${esc(direction.application || '')}</p>${direction.basis ? `<p class="subtle">依据：${esc(direction.basis)}</p>` : ''}${direction.evidence_status ? `<p class="subtle">证据状态：${esc(direction.evidence_status)}</p>` : ''}${direction.next_question ? `<p class="subtle">下一步：${esc(direction.next_question)}</p>` : ''}</div>`).join('') : '<p class="subtle">未形成采购方向。</p>';
+      const sources = assessment?.sources?.length ? `<ul class="source-list">${assessment.sources.map(link).map(value => `<li>${value}</li>`).join('')}</ul>` : '<p class="subtle">暂无来源链接。</p>';
       const errors = item.errors || [];
-      detail.innerHTML = `<div class="detail-title"><div><h2>${esc(item.name)}</h2><p class="subtle">${esc(item.industry)} · ${esc(item.operational_role)} · ${esc(item.commercial_relationship)}</p></div><div class="badges">${statusBadge(item)}<span class="badge ${matchClass(item.level)}">${scoreText(item)}</span></div></div><div class="detail-grid"><section class="module"><h3>公司实质定位</h3><p>${esc(pos?.text || '暂无背调定位。')}</p></section><section class="module"><h3>角色判断</h3><dl class="kv"><dt>运营角色</dt><dd>${esc(role?.operational_role || item.operational_role)}</dd><dt>商业关系</dt><dd>${esc(role?.commercial_relationship || item.commercial_relationship)}</dd>${role?.secondary_relationship ? `<dt>次级关系</dt><dd>${esc(role.secondary_relationship)}</dd>` : ''}</dl><p>${esc(role?.reason || '暂无角色依据。')}</p></section><section class="module"><h3>匹配度</h3><dl class="kv"><dt>纯匹配度</dt><dd><span class="badge ${matchClass(match?.level || item.level)}">${scoreText(item)}</span></dd><dt>证据置信度</dt><dd>${esc(match?.confidence || item.confidence)}</dd><dt>准入门槛</dt><dd>${esc(match?.entry_barrier || item.entry_barrier)}</dd></dl><p>${esc(match?.rationale || '暂无匹配度说明。')}</p></section><section class="module"><h3>主要采购方向</h3>${directionHtml}</section></div><details><summary>来源与辅助信息</summary><h3>来源链接</h3>${sources}<h3>已确认流程</h3><p>${esc((a?.confirmed_processes || []).join('、') || '未确认')}</p><h3>已确认衬里系统</h3><p>${esc((a?.confirmed_lining_systems || []).join('、') || '未确认')}</p>${errors.length ? `<h3 class="error">错误 / 失败原因</h3><ul class="error-list">${errors.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}<h3>输入记录</h3><dl class="kv"><dt>公司名</dt><dd>${esc(crm.name || item.name)}</dd><dt>行业</dt><dd>${esc(crm.industry || item.industry)}</dd><dt>官网</dt><dd>${crm.website ? `<a href="${esc(crm.website)}" target="_blank" rel="noopener noreferrer">${esc(crm.website)}</a>` : '未填写'}</dd><dt>LinkedIn</dt><dd>${crm.linkedin_url ? `<a href="${esc(crm.linkedin_url)}" target="_blank" rel="noopener noreferrer">${esc(crm.linkedin_url)}</a>` : '未填写'}</dd><dt>提供的背景</dt><dd>${esc(crm.background || '未填写')}</dd><dt>更新时间</dt><dd>${esc(crm.updated_at || '未填写')}</dd></dl></details>`;
+      detail.innerHTML = `<header class="detail-title"><div><h2>${esc(item.name)}</h2><p class="detail-meta">${esc(item.industry)} · ${esc(item.operational_role)} · ${esc(item.commercial_relationship)}</p></div><div class="summary-metrics"><div class="summary-metric"><span>匹配度</span><strong class="score-value mono">${scoreValue(item)}</strong></div><div class="summary-metric"><span>证据置信度</span><strong>${esc(match?.confidence || item.confidence)}</strong></div></div></header><div class="detail-grid"><section class="module"><h3>公司实质定位</h3><p>${esc(pos?.text || '暂无背调定位。')}</p></section><section class="module"><h3>角色判断</h3><dl class="kv"><dt>运营角色</dt><dd>${esc(role?.operational_role || item.operational_role)}</dd><dt>商业关系</dt><dd>${esc(role?.commercial_relationship || item.commercial_relationship)}</dd>${role?.secondary_relationship ? `<dt>次级关系</dt><dd>${esc(role.secondary_relationship)}</dd>` : ''}</dl><p>${esc(role?.reason || '暂无角色依据。')}</p></section><section class="module"><h3>匹配度</h3><div class="match-line"><strong class="mono">${scoreValue(item)}</strong><span>${esc(item.level || '未评分')}</span></div><dl class="kv"><dt>证据置信度</dt><dd>${tag(match?.confidence || item.confidence)}</dd><dt>准入门槛</dt><dd>${tag(match?.entry_barrier || item.entry_barrier)}</dd></dl>${componentHtml}<p>${esc(match?.rationale || '暂无匹配度说明。')}</p></section><section class="module"><h3>主要采购方向</h3>${directionHtml}</section></div><details class="auxiliary"><summary>来源与辅助信息</summary><div class="aux-grid"><section class="aux-block"><h3>来源链接</h3>${sources}</section><section class="aux-block"><h3>已确认信息</h3><dl class="kv"><dt>流程</dt><dd>${esc((assessment?.confirmed_processes || []).join('、') || '未确认')}</dd><dt>衬里系统</dt><dd>${esc((assessment?.confirmed_lining_systems || []).join('、') || '未确认')}</dd></dl></section>${errors.length ? `<section class="aux-block"><h3 class="error">错误 / 失败原因</h3><ul class="error-list">${errors.map(value => `<li>${esc(value)}</li>`).join('')}</ul></section>` : ''}<section class="aux-block"><h3>输入记录</h3><dl class="kv"><dt>公司名</dt><dd>${esc(crm.name || item.name)}</dd><dt>行业</dt><dd>${esc(crm.industry || item.industry)}</dd><dt>官网</dt><dd>${crm.website ? `<a href="${esc(crm.website)}" target="_blank" rel="noopener noreferrer">${esc(crm.website)}</a>` : '未填写'}</dd><dt>LinkedIn</dt><dd>${crm.linkedin_url ? `<a href="${esc(crm.linkedin_url)}" target="_blank" rel="noopener noreferrer">${esc(crm.linkedin_url)}</a>` : '未填写'}</dd><dt>背景</dt><dd>${esc(crm.background || '未填写')}</dd><dt>更新时间</dt><dd>${esc(crm.updated_at || '未填写')}</dd></dl></section></div></details>`;
     }
+    function openResearch() { $('drawer-backdrop').hidden = false; $('app-shell').inert = true; requestAnimationFrame(() => { $('drawer-backdrop').classList.add('open'); $('research-drawer').classList.add('open'); }); $('research-drawer').setAttribute('aria-hidden','false'); $('research-open').setAttribute('aria-expanded','true'); setTimeout(() => $('research-name').focus(),180); }
+    function closeResearch() { $('drawer-backdrop').classList.remove('open'); $('research-drawer').classList.remove('open'); $('research-drawer').setAttribute('aria-hidden','true'); $('research-open').setAttribute('aria-expanded','false'); $('app-shell').inert = false; setTimeout(() => { $('drawer-backdrop').hidden = true; $('research-open').focus(); },180); }
+    function containDrawerFocus(event) { if (event.key !== 'Tab') return; const controls = [...$('research-drawer').querySelectorAll('button,input,select,a[href]')].filter(control => !control.disabled && control.offsetParent !== null); if (!controls.length) return; const first = controls[0], last = controls[controls.length - 1]; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } }
     async function loadRun(runId) { state.run = await json(`/api/runs/${encodeURIComponent(runId)}`); setStats(state.run.stats); state.selected = state.run.companies?.[0] || null; renderList(); renderDetail(); }
     async function refreshRuns() { state.runs = (await json('/api/runs')).runs || []; renderRunOptions(); }
     async function submitResearch(event) {
       event.preventDefault();
       const button = $('research-submit'), status = $('research-status');
-      button.disabled = true; status.textContent = '正在背调，请稍候…';
-      const payload = { name: $('research-name').value.trim(), website: $('research-website').value.trim(), linkedin_url: $('research-linkedin').value.trim() };
+      button.disabled = true; button.setAttribute('aria-busy','true'); status.textContent = '正在背调，请稍候。完成后将自动打开结果。';
+      const payload = { name:$('research-name').value.trim(), website:$('research-website').value.trim(), linkedin_url:$('research-linkedin').value.trim() };
       try {
-        const response = await fetch('/api/research', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        const response = await fetch('/api/research',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(body.message || body.error || `HTTP ${response.status}`);
         await refreshRuns(); $('run-select').value = body.run_id; await loadRun(body.run_id);
-        status.textContent = body.exit_code === 1 ? '背调完成，已打开结果（其中可能有失败公司）。' : '背调完成，已打开结果。';
-      } catch (error) { status.textContent = `提交失败：${error.message}`; }
-      finally { button.disabled = false; }
+        status.textContent = body.exit_code === 1 ? '背调完成，已打开结果；该公司结果为失败状态。' : '背调完成，已打开新结果。';
+      } catch (error) { status.textContent = `提交失败：${error.message}。请检查输入后重试。`; }
+      finally { button.disabled = false; button.removeAttribute('aria-busy'); }
     }
-    async function start() { try { await refreshRuns(); if (state.runs.length) await loadRun(state.runs[0].run_id); else { setStats({}); renderList(); renderDetail(); } $('load-status').textContent = `已加载 ${state.runs.length} 个运行批次`; } catch (error) { $('load-status').textContent = `加载失败：${error.message}`; $('company-list').innerHTML = '<div class="empty error">无法读取本地运行结果。</div>'; } }
-    $('research-form').addEventListener('submit', submitResearch); $('run-select').addEventListener('change', event => loadRun(event.target.value).catch(error => $('load-status').textContent = `加载失败：${error.message}`)); $('search').addEventListener('input', renderList); $('status-select').addEventListener('change', renderList); start();
+    async function start() { try { await refreshRuns(); if (state.runs.length) await loadRun(state.runs[0].run_id); else { setStats({}); renderList(); renderDetail(); } $('load-status').textContent = `已加载 ${state.runs.length} 个运行批次`; } catch (error) { $('load-status').textContent = `加载失败：${error.message}`; $('company-list').innerHTML = '<div class="empty error">无法读取本地运行结果。请检查服务日志后刷新页面。</div>'; } }
+    $('research-open').addEventListener('click',openResearch); $('research-close').addEventListener('click',closeResearch); $('drawer-backdrop').addEventListener('click',closeResearch); $('research-drawer').addEventListener('keydown',containDrawerFocus); document.addEventListener('keydown',event => { if (event.key === 'Escape' && $('research-drawer').classList.contains('open')) closeResearch(); }); $('research-form').addEventListener('submit',submitResearch); $('run-select').addEventListener('change',event => loadRun(event.target.value).catch(error => $('load-status').textContent = `加载失败：${error.message}`)); $('search').addEventListener('input',renderList); $('status-select').addEventListener('change',renderList); start();
   </script>
 </body>
 </html>"""
