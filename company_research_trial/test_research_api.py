@@ -23,16 +23,12 @@ def valid_assessment() -> dict:
 class ApiTests(unittest.TestCase):
     def runtime_patches(self, directory: str):
         root = Path(directory)
-        skill = root / "skill"
-        skill.mkdir()
-        (skill / "SKILL.md").write_text("skill", encoding="utf-8")
         validator = root / "validate_assessment.py"
         validator.write_text("validator", encoding="utf-8")
         hermes = root / "hermes"
         hermes.write_text("#!/bin/sh\n", encoding="utf-8")
         hermes.chmod(0o755)
         return (
-            patch.object(api, "HERMES_SKILL_DIR", skill),
             patch.object(api, "resolved_validator", return_value=validator),
             patch.object(api, "load_env_file"),
             hermes,
@@ -41,7 +37,7 @@ class ApiTests(unittest.TestCase):
     def test_python_interface_is_crm_free_and_writes_selection_summary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             patches = self.runtime_patches(directory)
-            for item in patches[:3]:
+            for item in patches[:2]:
                 item.start()
             try:
                 output_root = Path(directory) / "runs"
@@ -73,7 +69,7 @@ class ApiTests(unittest.TestCase):
                         {"name": "  Example  ", "website": "https://example.test", "linkedin_url": ""},
                         output_root=output_root,
                         env_file=Path(directory) / "local.env",
-                        hermes=patches[3],
+                        hermes=patches[2],
                         timeout=12,
                         reasoning="low",
                         max_attempts=2,
@@ -94,13 +90,13 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(json.loads((run_dir / "selected-companies.json").read_text()), [{"id": "input-001", "name": "Example", "website": "https://example.test"}])
                 self.assertEqual(json.loads((run_dir / "summary.json").read_text())["valid"], 1)
             finally:
-                for item in reversed(patches[:3]):
+                for item in reversed(patches[:2]):
                     item.stop()
 
     def test_python_interface_accepts_name_only_without_crm(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             patches = self.runtime_patches(directory)
-            for item in patches[:3]:
+            for item in patches[:2]:
                 item.start()
             try:
                 output_root = Path(directory) / "runs"
@@ -128,7 +124,7 @@ class ApiTests(unittest.TestCase):
                         {"name": "  Example  "},
                         output_root=output_root,
                         env_file=Path(directory) / "local.env",
-                        hermes=patches[3],
+                        hermes=patches[2],
                         timeout=12,
                         reasoning="low",
                         max_attempts=2,
@@ -143,7 +139,7 @@ class ApiTests(unittest.TestCase):
                     [{"id": "input-001", "name": "Example"}],
                 )
             finally:
-                for item in reversed(patches[:3]):
+                for item in reversed(patches[:2]):
                     item.stop()
 
     def test_request_rejection_happens_before_run_creation(self) -> None:
@@ -163,7 +159,7 @@ class ApiTests(unittest.TestCase):
     def test_failed_research_returns_stable_failed_object(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             patches = self.runtime_patches(directory)
-            for item in patches[:3]:
+            for item in patches[:2]:
                 item.start()
             try:
                 failed = {
@@ -180,7 +176,7 @@ class ApiTests(unittest.TestCase):
                         {"name": "Broken"},
                         output_root=Path(directory) / "runs",
                         env_file=Path(directory) / "local.env",
-                        hermes=patches[3],
+                        hermes=patches[2],
                     )
                 self.assertEqual(set(result), set(api.RESULT_FIELDS))
                 self.assertEqual(result["status"], "failed")
@@ -189,7 +185,7 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(result["errors"], ["bad output"])
                 self.assertEqual(json.loads((Path(directory) / "runs" / result["trace_id"] / "summary.json").read_text())["failed"], 1)
             finally:
-                for item in reversed(patches[:3]):
+                for item in reversed(patches[:2]):
                     item.stop()
 
 

@@ -1,0 +1,10 @@
+model:
+  default: MiniMax-M2.7
+  provider: minimax-cn
+  base_url: https://api.minimaxi.com/anthropic
+memory:
+  provider: ""
+  memory_enabled: true
+  user_profile_enabled: false
+  memory_char_limit: 2200
+_config_version: 38

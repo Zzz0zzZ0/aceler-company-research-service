@@ -11,18 +11,20 @@ cp config/local.env.example config/local.env
 
 只有使用默认 CRM 抽样入口时，才需要在 `config/local.env` 中填写本机 CRM 连接配置。固定文件、Python API 或 JSON stdin/stdout 调用不需要 CRM。该文件和运行结果不会进入 Git。
 
-### Hermes profile 一致性
+### Hermes 精确运行配置
 
-仓库提供一份脱敏的 [`hermes-memory-seed.md`](skill/aceler-company-research/references/hermes-memory-seed.md)，供团队新建独立 Hermes profile 时复制。它只包含稳定产品/工艺和判断边界，不包含公司事实、CRM 数据、会话或密钥，也不能作为背调来源。
+仓库直接提供当前生产使用的完整通用业务记忆和 Hermes profile 配置：[`config/hermes/aceler-memory/`](config/hermes/aceler-memory/)。它包含完整产品主档、工艺映射、客户画像、评分和证据边界，没有删减业务规则。当前基准运行环境为 Hermes Agent `0.20.4`、MiniMax-M2.7、`minimax-cn` provider；不同模型或版本不属于精确复现。
 
 ```bash
-hermes profile create aceler-memory --description "Aceler company research"
-install -m 600 \
-  skill/aceler-company-research/references/hermes-memory-seed.md \
+hermes profile create aceler-memory --no-skills \
+  --description "Aceler approved product and industrial-process knowledge"
+install -m 644 config/hermes/aceler-memory/config.yaml \
+  "$HOME/.hermes/profiles/aceler-memory/config.yaml"
+install -m 600 config/hermes/aceler-memory/MEMORY.md \
   "$HOME/.hermes/profiles/aceler-memory/memories/MEMORY.md"
 ```
 
-`hermes profile create` 默认会生成 `aceler-memory` 包装命令。已有同名 profile 时先比较现有 `MEMORY.md`，不要直接覆盖。模型、Hermes 版本、项目提交、证据包和 Skill 契约仍需分别保持一致；该记忆种子只用于减少规则漂移。
+在该 profile 自己的 `.env` 中配置调用方持有的 `MINIMAX_CN_API_KEY`，不要提交密钥。`hermes profile create` 默认生成 `aceler-memory` 包装命令，与本项目默认调用路径一致。已有同名 profile 时先比较配置，不要直接覆盖。精确复现还要求使用相同项目提交、输入、冻结证据包、reasoning 和并发参数；记忆不是网页来源，不能进入 `sources`。
 
 ## Run
 
@@ -69,7 +71,7 @@ stdout 始终只有一个 JSON 对象。退出码 `0` 表示 `valid`，`1` 表�
 
 主 Hermes 调用必须直接用中文填写所有展示性自由文本，并保留公司/人名、产品专名、牌号、工艺缩写、数字和单位。Validator 完成后，系统剔除这些允许保留的英文专名；只有仍检测到英文说明时才执行一次失败开放的中文本地化。原始 canonical assessment、分数、枚举、证据 ID、URL 和产品字段保持不变；翻译结果单独写入 `display_assessment` 与 `localized-assessment.json`，仅供报告和看板使用。翻译超时、输出结构变化或受保护术语被改动时直接显示原文，不改变背调状态或主调用结果。
 
-首次合法结果恰好为 0% 时，系统默认使用同一证据包和首次 JSON 做一次独立复核，专门排查生产投入、高温耗材和技术渠道是否被遗漏。复核可以维持 0%，不会触发新搜索，也不会重复复核；复核输出无效时保留首次合法结果。紧急回退可在运行命令中加入 `--no-zero-review`，完整记录见 [`ZERO-SCORE-REVIEW-ROLLBACK.md`](ZERO-SCORE-REVIEW-ROLLBACK.md)。
+首次合法结果恰好为 0% 时，系统默认使用同一证据包和首次 JSON 做一次独立复核，专门排查生产投入、高温耗材和技术渠道是否被遗漏。复核可以维持 0%，不会触发新搜索，也不会重复复核；复核输出无效时保留首次合法结果。临时关闭时在运行命令中加入 `--no-zero-review`。
 
 Hermes prompt 使用 `$aceler-company-research` 与唯一 JSON skeleton。评分完全采用产品/工艺主导的五维：`production_process_need`（0–30）、`catalog_fit`（0–30）、`consumption_intensity`（0–20）、`demand_recurrence`（0–10）、`company_role_fit`（0–10），总分向下取 5。采购可能性、供应商、认证、准入、地域和来源数量只记录在证据状态、置信度、研究状态、进入门槛或下一步问题中，不改变产品匹配分。
 
@@ -83,7 +85,7 @@ Validator 只硬校验 JSON 结构、合法枚举与范围、固定产品目录�
 python3 skill/aceler-company-research/scripts/validate_assessment.py --self-test
 ```
 
-项目 skill 与 Hermes 安装版应保持一致。安装后可在 Hermes 的 skill 目录运行同一条自检命令。不要添加版本字段；历史结果仅由看板只读浏览，不迁移旧字段。
+服务运行只使用仓库内随提交固定的 Skill 契约和 validator，不依赖另一份 Hermes 全局 Skill。若同事还要在 Codex/Hermes 中直接调用独立 Skill，再单独安装同一提交中的 `skill/aceler-company-research/`。不要添加版本字段；历史结果仅由看板只读浏览，不迁移旧字段。
 
 ## Test
 

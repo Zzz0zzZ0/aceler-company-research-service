@@ -15,7 +15,6 @@ from .company_research_trial import (
     DEFAULT_ENV_FILE,
     DEFAULT_HERMES,
     DEFAULT_OUTPUT_ROOT,
-    HERMES_SKILL_DIR,
     load_env_file,
     localize_item,
     render_assessment,
@@ -113,9 +112,9 @@ def _check_options(timeout: int, reasoning: str, max_attempts: int, review_zero_
 
 def _check_runtime(env_file: Path, hermes: Path) -> None:
     load_env_file(env_file)
-    for required in (HERMES_SKILL_DIR / "SKILL.md", resolved_validator()):
+    for required in (resolved_validator(),):
         if not Path(required).is_file():
-            raise RuntimeError(f"Hermes skill file is unavailable: {required}")
+            raise RuntimeError(f"Project validator is unavailable: {required}")
     if not hermes.is_file() or not os.access(hermes, os.X_OK):
         raise RuntimeError(f"Hermes executable is unavailable: {hermes}")
 

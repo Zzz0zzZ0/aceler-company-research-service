@@ -33,9 +33,7 @@ DEFAULT_ENV_FILE = PROJECT_DIR / "config" / "local.env"
 DEFAULT_OUTPUT_ROOT = PROJECT_DIR / "outputs" / "company-research-trial"
 DEFAULT_HERMES = Path.home() / ".local" / "bin" / "aceler-memory"
 PROJECT_SKILL_DIR = PROJECT_DIR / "skill" / "aceler-company-research"
-HERMES_SKILL_DIR = Path.home() / ".hermes" / "skills" / "aceler-company-research"
 VALIDATOR = PROJECT_SKILL_DIR / "scripts" / "validate_assessment.py"
-INSTALLED_VALIDATOR = HERMES_SKILL_DIR / "scripts" / "validate_assessment.py"
 REPORT_CONTRACT = PROJECT_SKILL_DIR / "references" / "report-contract.md"
 PRODUCT_CONTRACT = PROJECT_SKILL_DIR / "references" / "aceler-products.md"
 ANYSEARCH_CLI = Path.home() / ".codex" / "skills" / "anysearch" / "scripts" / "anysearch_cli.js"
@@ -57,10 +55,8 @@ class AnySearchPackError(RuntimeError):
 
 
 def resolved_validator() -> Path:
-    """Use the project validator, with the installed copy when needed locally."""
-    if VALIDATOR.is_file():
-        return VALIDATOR
-    return INSTALLED_VALIDATOR
+    """Use the validator versioned with this project."""
+    return VALIDATOR
 
 
 def hostname(value: str) -> str:
@@ -1263,9 +1259,9 @@ def main(argv: list[str] | None = None) -> int:
     if not 1 <= args.max_attempts <= 5:
         parser.error("--max-attempts must be between 1 and 5")
     load_env_file(args.env_file)
-    for required in (HERMES_SKILL_DIR / "SKILL.md", resolved_validator()):
+    for required in (resolved_validator(),):
         if not required.is_file():
-            raise RuntimeError(f"Hermes skill file is unavailable: {required}")
+            raise RuntimeError(f"Project validator is unavailable: {required}")
     if not args.hermes.is_file() or not os.access(args.hermes, os.X_OK):
         raise RuntimeError(f"Hermes executable is unavailable: {args.hermes}")
 

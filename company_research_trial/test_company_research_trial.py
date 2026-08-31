@@ -135,11 +135,10 @@ The company operates an electric arc furnace and produces steel products. The pa
 
 
 class ValidatorTests(unittest.TestCase):
-    def test_self_test_covers_project_and_installed_copy(self) -> None:
-        for path in (VALIDATOR, Path.home() / ".hermes/skills/aceler-company-research/scripts/validate_assessment.py"):
-            result = subprocess.run(["python3", str(path), "--self-test"], capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(json.loads(result.stdout), {"valid": True, "tests": 5, "failed": []})
+    def test_project_validator_self_test(self) -> None:
+        result = subprocess.run(["python3", str(VALIDATOR), "--self-test"], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"valid": True, "tests": 5, "failed": []})
 
     def test_product_first_schema_accepts_and_scores_down_to_five(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
