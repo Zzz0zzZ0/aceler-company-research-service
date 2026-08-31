@@ -2,6 +2,8 @@
 
 本项目的核心链路接收来源中立的公司身份线索，使用 AnySearch 提供 1–2 个可信页面，再让 Hermes 按 `aceler-company-research` 仓库契约输出一份结构化背调。公司名是唯一必填项；官网和 LinkedIn 可选，行业、评级、背景或联系人等 CRM 字段既不必提供，也不会因缺失而降低评分。Twenty CRM 只是一个可选的只读抽样入口。每份 Hermes JSON 原样交给仓库 validator；最终状态只有 `valid` 或 `failed`。
 
+新机器或同事的 Codex 请不要只照本页的简版命令安装。完整的固定版本、Hermes profile、业务记忆、AnySearch、Codex Skill 自动发现和验收步骤见 [`INSTALL-CODEX.md`](INSTALL-CODEX.md)。
+
 ## Setup
 
 ```bash
