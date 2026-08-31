@@ -11,6 +11,19 @@ cp config/local.env.example config/local.env
 
 只有使用默认 CRM 抽样入口时，才需要在 `config/local.env` 中填写本机 CRM 连接配置。固定文件、Python API 或 JSON stdin/stdout 调用不需要 CRM。该文件和运行结果不会进入 Git。
 
+### Hermes profile 一致性
+
+仓库提供一份脱敏的 [`hermes-memory-seed.md`](skill/aceler-company-research/references/hermes-memory-seed.md)，供团队新建独立 Hermes profile 时复制。它只包含稳定产品/工艺和判断边界，不包含公司事实、CRM 数据、会话或密钥，也不能作为背调来源。
+
+```bash
+hermes profile create aceler-memory --description "Aceler company research"
+install -m 600 \
+  skill/aceler-company-research/references/hermes-memory-seed.md \
+  "$HOME/.hermes/profiles/aceler-memory/memories/MEMORY.md"
+```
+
+`hermes profile create` 默认会生成 `aceler-memory` 包装命令。已有同名 profile 时先比较现有 `MEMORY.md`，不要直接覆盖。模型、Hermes 版本、项目提交、证据包和 Skill 契约仍需分别保持一致；该记忆种子只用于减少规则漂移。
+
 ## Run
 
 ```bash
