@@ -16,11 +16,13 @@ from company_research_trial.company_research_trial import (
     DEFAULT_HERMES,
     DEFAULT_TOOLSETS,
     PROJECT_DIR,
+    RUNTIME_DECISION_CONTRACT,
     agentic_anysearch_pack,
     anysearch_pack,
     recall_first_anysearch_pack,
     anysearch_source_errors,
     arbitration_prompt,
+    catalog_router_prompt,
     child_environment,
     extract_json_object,
     localize_item,
@@ -466,21 +468,200 @@ class SeamTests(unittest.TestCase):
         self.assertLess(len(prompt), 40000)
         self.assertEqual(prompt.count('"company":'), 2)
 
-    def test_prompt_embeds_the_exact_runtime_contracts(self) -> None:
+    def test_lead_prompt_uses_compact_structured_evidence_and_runtime_contracts(self) -> None:
+        structured = """# Quote-verified structured company evidence
+
+## S1
+URL: https://example.test/process
+Title: Official process page
+
+# Verified facts
+
+## F1 — process
+The company operates an EAF.
+Evidence IDs: S1
+- S1 exact quote: operates an electric arc furnace
+
+# Original evidence for semantic assessment
+
+RAW_PAGE_BODY_MUST_NOT_REACH_DECISION_AGENTS
+"""
+        prompt = research_prompt(record(), structured, catalog_products=("Graphite Electrode",))
+        self.assertNotIn("RAW_PAGE_BODY_MUST_NOT_REACH_DECISION_AGENTS", prompt)
+        self.assertNotIn("# Research, scoring, and report contract", prompt)
+        self.assertNotIn("## Process mapping rules", prompt)
+        self.assertIn("## Product qualification matrix", prompt)
+        self.assertIn("| Graphite Electrode |", prompt)
+        self.assertNotIn("| Fumed Silica |", prompt)
+        self.assertIn("## Structured assessment schema", prompt)
+        self.assertLess(len(prompt), 15000)
+
+    def test_catalog_router_sees_compact_evidence_and_the_full_product_matrix(self) -> None:
+        structured = """# Quote-verified structured company evidence
+## S1
+URL: https://example.test/process
+Title: Process
+# Verified facts
+## F1 — process
+The company operates an EAF.
+Evidence IDs: S1
+# Original evidence for semantic assessment
+RAW_PAGE_BODY_MUST_NOT_REACH_ROUTER
+"""
+        prompt = catalog_router_prompt(structured)
+        self.assertNotIn("RAW_PAGE_BODY_MUST_NOT_REACH_ROUTER", prompt)
+        self.assertIn("| Graphite Electrode |", prompt)
+        self.assertIn("| Fumed Silica |", prompt)
+        self.assertNotIn("## Process mapping rules", prompt)
+        self.assertLess(len(prompt), 15000)
+
+    def test_recall_prompt_is_role_specific_instead_of_copying_the_lead_prompt(self) -> None:
+        low = zero_assessment()
+        structured = """# Quote-verified structured company evidence
+## S1
+URL: https://example.test/process
+Title: Process
+# Verified facts
+## F1 — process
+The company operates an EAF.
+Evidence IDs: S1
+# Original evidence for semantic assessment
+RAW_PAGE_BODY_MUST_NOT_REACH_RECALL
+"""
+        prompt = recall_candidate_prompt(
+            record(),
+            structured,
+            low,
+            0,
+        )
+        self.assertNotIn("RAW_PAGE_BODY_MUST_NOT_REACH_RECALL", prompt)
+        self.assertNotIn("LEAD_ROLE", prompt)
+        self.assertIn("RECALL_ROLE", prompt)
+        self.assertIn("| Graphite Electrode |", prompt)
+        self.assertIn("| Fumed Silica |", prompt)
+        self.assertLess(len(prompt), 30000)
+
+    def test_long_raw_evidence_is_structured_before_routing_and_decision(self) -> None:
+        sentinel = "RAW_LONG_PAGE_SENTINEL"
+        raw = EVIDENCE + ("\n" + sentinel + " supporting context.") * 700
+        extraction = {
+            "company": "Example Steel",
+            "identity_status": "confirmed",
+            "core_business_confirmed": True,
+            "facts": [
+                {
+                    "category": "process",
+                    "statement": "The company operates an electric arc furnace.",
+                    "evidence": [
+                        {"source_id": "S1", "quote": "operates an electric arc furnace"}
+                    ],
+                }
+            ],
+            "unresolved": ["Electrode specification is not public"],
+        }
+        invocations = [
+            {
+                "assessment": extraction,
+                "errors": [],
+                "usage": {"input_tokens": 5000},
+                "attempt": {"kind": "evidence", "has_json": True},
+                "seconds": 0.1,
+            },
+            {
+                "assessment": {"products": ["Graphite Electrode"]},
+                "errors": [],
+                "usage": {"input_tokens": 100},
+                "attempt": {"kind": "catalog_router", "has_json": True},
+                "seconds": 0.1,
+            },
+            {
+                "assessment": assessment(),
+                "errors": [],
+                "raw": "assessment",
+                "usage": {"input_tokens": 200},
+                "attempt": {"kind": "lead_attempt_1", "has_json": True},
+                "seconds": 0.1,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "company_research_trial.company_research_trial._invoke_hermes", side_effect=invocations
+        ) as invoked:
+            item = research_one(
+                record(),
+                1,
+                Path(directory),
+                hermes=Path("/bin/true"),
+                evidence_pack=raw,
+                review_zero_score=False,
+            )
+        self.assertEqual(item["status"], "valid")
+        self.assertEqual(invoked.call_count, 3)
+        self.assertIn(sentinel, invoked.call_args_list[0].kwargs["prompt"])
+        self.assertNotIn("RUNTIME_DECISION_CONTRACT", invoked.call_args_list[0].kwargs["prompt"])
+        self.assertNotIn(sentinel, invoked.call_args_list[1].kwargs["prompt"])
+        self.assertNotIn(sentinel, invoked.call_args_list[2].kwargs["prompt"])
+        self.assertTrue(item["research"]["evidence_agent"]["usable"])
+        self.assertEqual(item["research"]["agent_call_count"], 3)
+
+    def test_research_routes_products_before_the_lead_without_forwarding_raw_pages(self) -> None:
+        structured = """# Quote-verified structured company evidence
+## S1
+URL: https://example.test/process
+Title: Official process page
+# Verified facts
+## F1 — process
+The company operates an electric arc furnace.
+Evidence IDs: S1
+# Original evidence for semantic assessment
+RAW_PAGE_BODY_MUST_NOT_REACH_DECISION_AGENTS
+"""
+        invocations = [
+            {
+                "assessment": {"products": ["Graphite Electrode"]},
+                "errors": [],
+                "usage": {"input_tokens": 100},
+                "attempt": {"kind": "catalog_router", "has_json": True},
+                "seconds": 0.1,
+            },
+            {
+                "assessment": assessment(),
+                "errors": [],
+                "raw": "assessment",
+                "usage": {"input_tokens": 200},
+                "attempt": {"kind": "lead_attempt_1", "has_json": True},
+                "seconds": 0.1,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "company_research_trial.company_research_trial._invoke_hermes", side_effect=invocations
+        ) as invoked:
+            item = research_one(
+                record(),
+                1,
+                Path(directory),
+                hermes=Path("/bin/true"),
+                evidence_pack=structured,
+                review_zero_score=False,
+            )
+        self.assertEqual(item["status"], "valid")
+        self.assertEqual(invoked.call_count, 2)
+        self.assertIn("Catalog Router", invoked.call_args_list[0].kwargs["prompt"])
+        lead_prompt = invoked.call_args_list[1].kwargs["prompt"]
+        self.assertIn("| Graphite Electrode |", lead_prompt)
+        self.assertNotIn("| Fumed Silica |", lead_prompt)
+        self.assertNotIn("RAW_PAGE_BODY_MUST_NOT_REACH_DECISION_AGENTS", lead_prompt)
+        self.assertEqual(item["research"]["catalog_router"]["products"], ["Graphite Electrode"])
+
+    def test_prompt_embeds_only_the_compact_runtime_contracts(self) -> None:
         prompt = research_prompt(record(), EVIDENCE)
-        runtime_report_contract = REPORT_CONTRACT.read_text(encoding="utf-8").split(
-            "\nRun `python3 scripts/validate_assessment.py", 1
-        )[0].strip()
+        runtime_report_contract = RUNTIME_DECISION_CONTRACT.read_text(encoding="utf-8").strip()
         self.assertIn(runtime_report_contract, prompt)
+        self.assertNotIn(REPORT_CONTRACT.read_text(encoding="utf-8").strip(), prompt)
         self.assertNotIn("## Final report template", prompt)
-        self.assertIn(PRODUCT_CONTRACT.read_text(encoding="utf-8").strip(), prompt)
+        self.assertNotIn(PRODUCT_CONTRACT.read_text(encoding="utf-8").strip(), prompt)
+        self.assertIn("## Product qualification matrix", prompt)
         self.assertIn("成品内部组分", prompt)
         self.assertIn("运营角色写“终端用户”", prompt)
-        self.assertIn("first use evidence to identify the company's main revenue activity", prompt)
-        self.assertIn("Judge the commercial relationship to Aceler independently", prompt)
-        self.assertIn("Resolve entity scope semantically", prompt)
-        self.assertIn("parent, group, brand, affiliate, division, or site", prompt)
-        self.assertIn("polycrystalline", prompt.lower())
         self.assertIn("Calcined Alpha Alumina", prompt)
         self.assertIn("主体归属独立判断", prompt)
         self.assertLess(prompt.index("主体归属独立判断"), prompt.index("source_type"))
@@ -1619,7 +1800,7 @@ class SeamTests(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(marker, "prompt must expose a source-neutral identity seed")
-        identity = prompt.split(marker, 1)[1].split("\n\nREPORT_CONTRACT", 1)[0]
+        identity = prompt.split(marker, 1)[1].split("\n\nRUNTIME_DECISION_CONTRACT", 1)[0]
         self.assertEqual(json.loads(identity), {"company": "Acme Abrasives"})
 
     def test_prompt_and_zero_review_are_source_neutral_and_non_gating(self) -> None:
@@ -1637,7 +1818,6 @@ class SeamTests(unittest.TestCase):
         self.assertIn("产品组合合作伙伴", prompt)
         self.assertIn("recurring use", prompt)
         self.assertIn("independent of refractories", prompt)
-        self.assertIn("high-purity technical ceramics retain product fit", prompt)
         self.assertIn("合理原料投入路线不因私有规格或供应商未公开而消失", prompt)
         self.assertNotIn("product_match>=5、commercial_match=4时使用4分跟进例外", prompt)
         self.assertIn("product_match>=5、commercial_match=4不是自动跟进规则", prompt)
@@ -1720,12 +1900,16 @@ class SeamTests(unittest.TestCase):
         recall["procurement_directions"] = [
             {**recall["procurement_directions"][0], "product": "Fumed Silica"}
         ]
-        prompt = arbitration_prompt(EVIDENCE, lead, recall)
+        structured = EVIDENCE + "\n# Original evidence for semantic assessment\nRAW_ARBITER_PAGE_BODY"
+        prompt = arbitration_prompt(structured, lead, recall)
         self.assertIn("| Fumed Silica |", prompt)
-        self.assertIn("official rheology", prompt)
+        self.assertIn("Documented rheology", prompt)
         self.assertIn("行业通常使用", prompt)
         self.assertIn("绝不能用来新建精确产品", prompt)
         self.assertNotIn("- Andalusite", prompt)
+        self.assertNotIn("RAW_ARBITER_PAGE_BODY", prompt)
+        self.assertNotIn("### Steelmaking", prompt)
+        self.assertLess(len(prompt), 18000)
 
     def test_runtime_memory_keeps_pac_and_high_purity_routes_enabled(self) -> None:
         memory = (PROJECT_DIR / "config" / "hermes" / "aceler-memory" / "MEMORY.md").read_text(encoding="utf-8")
@@ -1833,8 +2017,11 @@ class SeamTests(unittest.TestCase):
             self.assertTrue((Path(item["record_dir"]) / "accepted-assessment.json").is_file())
             self.assertTrue((Path(item["record_dir"]) / "evidence-bundle.json").is_file())
             self.assertTrue((Path(item["record_dir"]) / "orchestration.json").is_file())
-            self.assertEqual(item["research"]["orchestration_version"], "v1")
-            self.assertEqual(item["research"]["role_call_counts"], {"lead": 1, "recall": 0, "arbiter": 0})
+            self.assertEqual(item["research"]["orchestration_version"], "v2")
+            self.assertEqual(
+                item["research"]["role_call_counts"],
+                {"evidence": 0, "catalog_router": 0, "lead": 1, "recall": 0, "arbiter": 0},
+            )
             self.assertFalse((Path(directory) / ("defer" + "red-companies.json")).exists())
 
     def test_simple_format_errors_are_repaired_without_another_hermes_call(self) -> None:
@@ -1967,7 +2154,7 @@ class SeamTests(unittest.TestCase):
         prompt = low_score_review_prompt("BASE", low, 50)
         self.assertIn("不得降低", prompt)
         self.assertIn("保持上次", prompt)
-        critic_prompt = recall_candidate_prompt("BASE", low, 50)
+        critic_prompt = recall_candidate_prompt(record(), EVIDENCE, low, 50)
         self.assertIn("CRITIC_SCOPE", critic_prompt)
         self.assertIn("上次已通过校验的 JSON", critic_prompt)
         invocations = [

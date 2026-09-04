@@ -36,6 +36,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from company_research_trial.agent_contracts import AgentCandidate, ArbitrationDecision, EvidenceBundle
 from company_research_trial.orchestration import orchestrate_assessment
+from company_research_trial.structured_evidence import compact_evidence_pack, extraction_prompt, prepare_structured_evidence
 
 
 TRIAL_DIR = Path(__file__).resolve().parent
@@ -49,6 +50,7 @@ PROJECT_SKILL_DIR = PROJECT_DIR / "skill" / "aceler-company-research"
 VALIDATOR = PROJECT_SKILL_DIR / "scripts" / "validate_assessment.py"
 REPORT_CONTRACT = PROJECT_SKILL_DIR / "references" / "report-contract.md"
 PRODUCT_CONTRACT = PROJECT_SKILL_DIR / "references" / "aceler-products.md"
+RUNTIME_DECISION_CONTRACT = PROJECT_SKILL_DIR / "references" / "runtime-decision-contract.md"
 ANYSEARCH_CLI = Path.home() / ".codex" / "skills" / "anysearch" / "scripts" / "anysearch_cli.js"
 ANYSEARCH_BRIDGE = TRIAL_DIR / "anysearch_bridge.js"
 ANYSEARCH_CACHE_DIR = PROJECT_DIR / "outputs" / "anysearch-cache"
@@ -2470,19 +2472,77 @@ def child_environment() -> dict[str, str]:
     }
 
 
-def research_prompt(record: dict[str, Any], evidence_pack: str | None = None) -> str:
-    """Build the one-pass Hermes prompt from the repository contract."""
+def _compact_evidence_for_decision(evidence_pack: str) -> str:
+    """Keep quote-verified facts for decision roles while retaining raw pages on disk."""
+    return compact_evidence_pack(evidence_pack)
+
+
+def _runtime_report_contract() -> str:
+    """Return the versioned compact interface used by decision agents."""
+    return RUNTIME_DECISION_CONTRACT.read_text(encoding="utf-8").strip()
+
+
+def _runtime_product_contract(catalog_products: tuple[str, ...] | None = None) -> str:
+    """Return the full matrix fallback or only the product rows selected by the router."""
+    text = PRODUCT_CONTRACT.read_text(encoding="utf-8")
+    catalog = text.split("## Process mapping rules", 1)[0].strip()
+    if catalog_products is not None:
+        allowed = set(catalog_products) & _catalog_products()
+        matrix = catalog.split("## Product qualification matrix", 1)[1]
+        rows = []
+        for line in matrix.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) >= 3 and cells[0] in allowed:
+                rows.append(line)
+        catalog = (
+            "# Routed Aceler catalog subset\n\n"
+            "Only these router-selected products may appear in `procurement_directions`: "
+            + (", ".join(sorted(allowed)) if allowed else "none")
+            + ".\n\n## Product qualification matrix\n\n"
+            + "| Product | Strong process/application signals | Do not infer / required distinction |\n"
+            + "|---|---|---|\n"
+            + "\n".join(rows)
+        )
+    shared_rules = text.split("## Process mapping rules", 1)[1].split("### Refractory manufacturer", 1)[0].strip()
+    cautions = "## Disqualifiers and cautions" + text.split("## Disqualifiers and cautions", 1)[1]
+    return catalog + "\n\n## Shared semantic rules\n\n" + shared_rules + "\n\n" + cautions.strip()
+
+
+def catalog_router_prompt(evidence_pack: str) -> str:
+    """Give the routing role the complete matrix without report/scoring instructions."""
+    catalog = PRODUCT_CONTRACT.read_text(encoding="utf-8").split("## Process mapping rules", 1)[0].strip()
+    evidence = _compact_evidence_for_decision(evidence_pack)
+    return (
+        "你是 Catalog Router，只缩小后续决策 Agent 的产品上下文。不评分、不判断是否跟进、不搜索。"
+        "基于公司级事实，选出最多 12 个具有直接或强工艺推断路径的目录产品。优先保召回：证据已确认对应制造、消耗、分销、材料交付/采购、规格控制或互补供应时纳入；仅行业标签或设备/EPC/客户行业不纳入。"
+        "产品名必须逐字来自矩阵。无路径可返回空数组。只返回："
+        '{"products":["exact catalog product"]}.\n\n'
+        "---PRODUCT MATRIX---\n"
+        + catalog
+        + "\n---COMPACT VERIFIED EVIDENCE---\n"
+        + evidence
+    )
+
+
+def _decision_context(
+    record: dict[str, Any],
+    evidence_pack: str | None = None,
+    *,
+    catalog_products: tuple[str, ...] | None = None,
+) -> str:
+    """Build the shared compact facts and contracts used by decision roles."""
     identity = {"company": str(record.get("name") or "")}
     for field in ("website", "linkedin_url"):
         if record.get(field):
             identity[field] = record[field]
-    report_contract = REPORT_CONTRACT.read_text(encoding="utf-8").split(
-        "\nRun `python3 scripts/validate_assessment.py", 1
-    )[0].strip()
-    product_contract = PRODUCT_CONTRACT.read_text(encoding="utf-8").strip()
-    evidence = evidence_pack.strip() if evidence_pack else "无；research_status 使用 partial，不能编造事实。"
+    report_contract = _runtime_report_contract()
+    product_contract = _runtime_product_contract(catalog_products)
+    evidence = (
+        _compact_evidence_for_decision(evidence_pack)
+        if evidence_pack
+        else "无；research_status 使用 partial，不能编造事实。"
+    )
     return (
-        "使用 $aceler-company-research 研究该实体，不研究联系人。\n"
         "只返回契约 JSON，不调用工具/搜索/shell/validator。枚举、字段和产品名必须合法；不加 wrapper/version/modules，不改目录名。\n"
         "INPUT_IDENTITY_SEED 是待核验线索；缺失字段未知，不是负面证据，不得降分/判 0。角色、工艺和产品只按证据。\n"
         "主体归属独立判断：结构化主体判断只是提醒。合理同一主体可标 partial/ambiguous、降 confidence，仍要根据实质定位评分；无关主体/集团不得借用。\n"
@@ -2496,15 +2556,28 @@ def research_prompt(record: dict[str, Any], evidence_pack: str | None = None) ->
         "成品内部组分可作投入；磨料制造商运营角色写“终端用户”。\n"
         "\n"
         "INPUT_IDENTITY_SEED:\n" + json.dumps(identity, ensure_ascii=False) + "\n\n"
-        "REPORT_CONTRACT（运行时唯一 schema 与评分规则）:\n---BEGIN REPORT CONTRACT---\n"
+        "RUNTIME_DECISION_CONTRACT（角色、评分与 JSON schema）:\n---BEGIN DECISION CONTRACT---\n"
         + report_contract
-        + "\n---END REPORT CONTRACT---\n\n"
-        "PRODUCT_CONTRACT（运行时唯一产品目录与工艺映射）:\n---BEGIN PRODUCT CONTRACT---\n"
+        + "\n---END DECISION CONTRACT---\n\n"
+        "RUNTIME_PRODUCT_CONTRACT（本角色所需的目录与产品资格矩阵）:\n---BEGIN PRODUCT CONTRACT---\n"
         + product_contract
         + "\n---END PRODUCT CONTRACT---\n\n"
         "ANYSEARCH_EVIDENCE_PACK:\n---BEGIN EVIDENCE---\n" + evidence + "\n---END EVIDENCE---\n\n"
         "FINAL_SEMANTIC_CHECK：有证据的 PAC/PACl 制造、销售/分销或持续投加是直接目录路径；一般水处理标签不足，其他目录品无关或吞吐/采购未公开不得否定该路径。product_match>=5、commercial_match=4不是自动跟进规则。商业4分例外必须引用公司级证据支持的具体商业动作：持续消耗/制造投入、实际分销、材料随项目交付/采购、规格控制或可落地互补供应；仅规模或进入条件可未知。设备制造、EPC或客户行业不能代替这些动作，同业/组合重合也不等于交易路径；不得以 commercial_match<4 跟进。确认制造高纯氧化铝陶瓷、陶瓷粉体或其他明确化学体系的技术陶瓷时，合理原料投入路线不因私有规格或供应商未公开而消失；仅销售或安装成品不证明原料采购。\n"
         "FINAL_OUTPUT_LANGUAGE：返回前检查公司定位、角色理由、评分依据、流程/衬里说明及采购方向的用途、依据和下一步问题；除公司/人名、品牌、目录产品、牌号、工艺缩写、数字和单位外，所有展示性自由文本必须使用简洁、自然的中文。字段名、枚举、URL 和 evidence_id 不得翻译。只返回 JSON。"
+    )
+
+
+def research_prompt(
+    record: dict[str, Any],
+    evidence_pack: str | None = None,
+    *,
+    catalog_products: tuple[str, ...] | None = None,
+) -> str:
+    """Build a lead-only prompt without recall or arbitration instructions."""
+    return (
+        "LEAD_ROLE：使用 $aceler-company-research 证据和下方运行时契约独立产生首次完整评估；只研究该实体，不研究联系人。\n"
+        + _decision_context(record, evidence_pack, catalog_products=catalog_products)
     )
 
 
@@ -2516,7 +2589,7 @@ def zero_score_review_prompt(base_prompt: str, prior_assessment: dict[str, Any])
         "只使用同一份 ANYSEARCH_EVIDENCE_PACK 和上次 JSON，逐项复查四类可能性："
         "耐材制造及其技术上可映射的原料；铸造、熔炼及其炉衬/高温耗材；"
         "工程安装、材料交付、规格控制、贸易或分销渠道；其他直接生产投入。\n"
-        "证据已确认上述耐材制造、铸造/熔炼、相关工程/分销渠道、互补供应或高重合产品组合时，必须体现为对应的五分项商业相关性；不得把渠道或上游价值只压缩到 company_role_fit。相关材料分销/转售本身就证明持续采购与市场触达，不需要额外证明“未满足缺口”。精确产品仍须按证据限定。"
+        "证据已确认上述耐材制造、铸造/熔炼、相关工程/分销渠道、互补供应或高重合产品组合时，必须体现为对应的非零五分项商业相关性；不得把渠道或上游价值只压缩到 company_role_fit。相关材料分销/转售本身就证明持续采购与市场触达，不需要额外证明“未满足缺口”。精确产品仍须按证据限定。"
         "公司级相关实质定位已确认时，不得把“未确认具体目录品”等同于“所有分项必须为 0”；按具体程度、技术邻接、物料强度和周期语义判断，不设置固定底分。"
         "不得把‘该公司的产出不在 Aceler 目录’等同于‘其生产工艺不消耗 Aceler 产品’。"
         "工程/OEM 只有在证据确认材料供货、耐材包交付、安装材料采购、配方或规格控制时才是受支持渠道；仅有炉窑/EPC/客户行业是项目邻接。安装或转售成品不证明采购其上游原料。"
@@ -2560,17 +2633,19 @@ def low_score_review_prompt(
 
 
 def recall_candidate_prompt(
-    base_prompt: str,
+    record: dict[str, Any],
+    evidence_pack: str,
     prior_assessment: dict[str, Any],
     initial_score: int,
 ) -> str:
-    """Give a separate critic one bounded target instead of inviting a second free-form analysis."""
+    """Build a recall-only prompt; the full matrix lets it audit router omissions."""
+    context = _decision_context(record, evidence_pack, catalog_products=None)
     review = (
-        zero_score_review_prompt(base_prompt, prior_assessment)
+        zero_score_review_prompt(context, prior_assessment)
         if initial_score == 0
-        else low_score_review_prompt(base_prompt, prior_assessment, initial_score)
+        else low_score_review_prompt(context, prior_assessment, initial_score)
     )
-    return review + (
+    return "RECALL_ROLE：只复核 Lead 是否漏掉已有证据路径；不重做 Lead 任务。\n" + review + (
         "\n\nCRITIC_SCOPE：你是与 Lead 分离的召回审查角色，但只审查上次结果是否漏掉证据路径。"
         "不得因为重新措辞、行业常见用途或未公开私有配方而引入新的精确目录产品；每个新增产品必须满足 PRODUCT_CONTRACT 的产品级最低语义门槛。"
         "没有明确遗漏时逐字保持上次评分、跟进结论和采购方向。只返回完整 JSON。"
@@ -2578,7 +2653,7 @@ def recall_candidate_prompt(
 
 
 def _arbitration_product_rules(*assessments: dict[str, Any]) -> str:
-    """Return exact catalog rows for disputed products, plus the shared process cautions."""
+    """Return exact disputed rows plus only shared product cautions."""
     products = {
         str(direction.get("product") or "")
         for assessment in assessments
@@ -2592,8 +2667,9 @@ def _arbitration_product_rules(*assessments: dict[str, Any]) -> str:
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if len(cells) >= 3 and cells[0] in products:
             rows.append(line)
-    process_rules = text.split("## Process mapping rules", 1)[1]
-    return "\n".join([*rows, "", "## Process mapping and disqualifiers", process_rules.strip()]).strip()
+    shared_rules = text.split("## Process mapping rules", 1)[1].split("### Refractory manufacturer", 1)[0]
+    cautions = "## Disqualifiers and cautions" + text.split("## Disqualifiers and cautions", 1)[1]
+    return "\n".join([*rows, "", "## Shared semantic rules", shared_rules.strip(), cautions.strip()]).strip()
 
 
 def arbitration_prompt(
@@ -2602,10 +2678,9 @@ def arbitration_prompt(
     recall_assessment: dict[str, Any],
 ) -> str:
     """Build a bounded selector prompt; the arbiter never searches or rewrites an assessment."""
-    score_rubric = REPORT_CONTRACT.read_text(encoding="utf-8").split("## Score rubric", 1)[1].split(
-        "## Structured assessment schema", 1
-    )[0]
+    score_rubric = _runtime_report_contract().split("## Structured assessment schema", 1)[0]
     product_rules = _arbitration_product_rules(lead_assessment, recall_assessment)
+    evidence = _compact_evidence_for_decision(evidence_pack)
     return (
         "你是公司匹配评估的最终争议仲裁员。两份候选均已通过结构和引用边界校验。"
         "只判断 Recall 候选新增或提高的路径是否确由公司级证据和产品目录支持；不得搜索、补写或合并评估。"
@@ -2621,7 +2696,7 @@ def arbitration_prompt(
         + "\n---本次争议产品的精确语义规则---\n"
         + product_rules
         + "\n---证据包---\n"
-        + evidence_pack.strip()
+        + evidence
         + "\n---Lead 候选---\n"
         + json.dumps(lead_assessment, ensure_ascii=False)
         + "\n---Recall 候选---\n"
@@ -2679,6 +2754,7 @@ def _invoke_hermes(
     started = time.monotonic()
     # Public pages occasionally contain NUL separators, which POSIX argv cannot carry.
     prompt = prompt.replace("\x00", "")
+    input_chars = len(prompt)
     usage_path = usage_path or record_dir / "hermes-usage.json"
     raw_path = raw_path or record_dir / "hermes-raw.txt"
     command = [
@@ -2750,6 +2826,7 @@ def _invoke_hermes(
             "returncode": returncode,
             "has_json": assessment is not None,
             "seconds": round(time.monotonic() - started, 1),
+            "input_chars": input_chars,
         },
     }
 
@@ -3225,6 +3302,117 @@ def _run_validated_candidate(
     )
 
 
+def _run_catalog_router(
+    *,
+    evidence_pack: str,
+    record_dir: Path,
+    hermes: Path,
+    timeout: int,
+    reasoning: str,
+    toolsets: str,
+) -> tuple[tuple[str, ...] | None, dict[str, Any]]:
+    """Select a generous catalog subset; invalid routing falls back to the full matrix."""
+    invocation = _invoke_hermes(
+        record_dir=record_dir,
+        hermes=hermes,
+        timeout=timeout,
+        reasoning=reasoning,
+        prompt=catalog_router_prompt(evidence_pack),
+        toolsets=toolsets,
+        usage_path=record_dir / "hermes-usage-catalog-router.json",
+        raw_path=record_dir / "hermes-raw-catalog-router.txt",
+        attempt_kind="catalog_router",
+    )
+    errors = [str(error) for error in invocation.get("errors") or []]
+    payload = invocation.get("assessment")
+    products: tuple[str, ...] | None = None
+    if not isinstance(payload, dict) or not isinstance(payload.get("products"), list):
+        errors.append("Catalog router must return a products array")
+    else:
+        catalog = _catalog_products()
+        raw_products = payload["products"]
+        invalid = [str(value) for value in raw_products if not isinstance(value, str) or value not in catalog]
+        if len(raw_products) > 12:
+            errors.append("Catalog router returned more than 12 products")
+        if invalid:
+            errors.append("Catalog router returned products outside the fixed catalog")
+        if not errors:
+            products = tuple(dict.fromkeys(raw_products))
+    metadata = {
+        "called": True,
+        "products": list(products or ()),
+        "fallback_full_matrix": products is None,
+        "errors": list(dict.fromkeys(errors)),
+        "input_chars": (invocation.get("attempt") or {}).get("input_chars"),
+        "usage": invocation.get("usage"),
+        "seconds": invocation.get("seconds"),
+    }
+    (record_dir / "catalog-router.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return products, metadata
+
+
+def _run_evidence_agent(
+    *,
+    record: dict[str, Any],
+    evidence_pack: str,
+    record_dir: Path,
+    hermes: Path,
+    timeout: int,
+    reasoning: str,
+    toolsets: str,
+) -> tuple[str, dict[str, Any]]:
+    """Convert long raw pages to quote-verified facts for downstream roles."""
+    invocation = _invoke_hermes(
+        record_dir=record_dir,
+        hermes=hermes,
+        timeout=timeout,
+        reasoning=reasoning,
+        prompt=extraction_prompt(str(record.get("name") or ""), evidence_pack),
+        toolsets=toolsets,
+        usage_path=record_dir / "hermes-usage-evidence.json",
+        raw_path=record_dir / "hermes-raw-evidence.txt",
+        attempt_kind="evidence",
+    )
+    errors = [str(error) for error in invocation.get("errors") or []]
+    prepared: dict[str, Any] | None = None
+    extraction = invocation.get("assessment")
+    if isinstance(extraction, dict):
+        prepared = prepare_structured_evidence(extraction, evidence_pack)
+        errors.extend(str(error) for error in prepared.get("warnings") or [])
+    else:
+        errors.append("Evidence agent returned no JSON object")
+    usable = bool(prepared and prepared.get("status") == "usable" and prepared.get("facts"))
+    if usable:
+        full_structured = str(prepared["evidence_pack"])
+        (record_dir / "structured-evidence.md").write_text(full_structured, encoding="utf-8")
+        (record_dir / "structured-evidence.json").write_text(
+            json.dumps(
+                {key: value for key, value in prepared.items() if key != "evidence_pack"},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        decision_evidence = _compact_evidence_for_decision(full_structured)
+    else:
+        decision_evidence = evidence_pack.strip()
+    metadata = {
+        "called": True,
+        "usable": usable,
+        "fact_count": len(prepared.get("facts") or []) if prepared else 0,
+        "raw_chars": len(evidence_pack),
+        "decision_chars": len(decision_evidence),
+        "errors": list(dict.fromkeys(errors)),
+        "input_chars": (invocation.get("attempt") or {}).get("input_chars"),
+        "usage": invocation.get("usage"),
+        "seconds": invocation.get("seconds"),
+    }
+    return decision_evidence, metadata
+
+
 def _run_arbitration(
     *,
     lead: AgentCandidate,
@@ -3364,17 +3552,63 @@ def research_one(
         }
         (record_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return result
+    raw_evidence_pack = evidence_pack
+    evidence_agent_metadata: dict[str, Any] = {
+        "called": False,
+        "usable": "\n# Original evidence for semantic assessment\n" in raw_evidence_pack,
+        "fact_count": 0,
+        "raw_chars": len(raw_evidence_pack),
+        "decision_chars": len(_compact_evidence_for_decision(raw_evidence_pack)),
+        "errors": [],
+        "input_chars": None,
+        "usage": None,
+        "seconds": 0.0,
+    }
+    if (
+        "\n# Original evidence for semantic assessment\n" not in raw_evidence_pack
+        and len(raw_evidence_pack) > 15_000
+    ):
+        decision_evidence, evidence_agent_metadata = _run_evidence_agent(
+            record=record,
+            evidence_pack=raw_evidence_pack,
+            record_dir=record_dir,
+            hermes=hermes,
+            timeout=timeout,
+            reasoning=reasoning,
+            toolsets=toolsets,
+        )
+    else:
+        decision_evidence = _compact_evidence_for_decision(raw_evidence_pack)
+    router_metadata: dict[str, Any] = {
+        "called": False,
+        "products": [],
+        "fallback_full_matrix": True,
+        "errors": [],
+        "input_chars": None,
+        "usage": None,
+        "seconds": 0.0,
+    }
+    catalog_products: tuple[str, ...] | None = None
+    if decision_evidence != raw_evidence_pack.strip() or len(decision_evidence) > 15_000:
+        catalog_products, router_metadata = _run_catalog_router(
+            evidence_pack=decision_evidence,
+            record_dir=record_dir,
+            hermes=hermes,
+            timeout=timeout,
+            reasoning=reasoning,
+            toolsets=toolsets,
+        )
     evidence_bundle = EvidenceBundle(
         company=str(record.get("name") or ""),
-        text=evidence_pack,
-        sources=tuple(_pack_sources(evidence_pack).values()),
+        text=decision_evidence,
+        sources=tuple(_pack_sources(raw_evidence_pack).values()),
         retrieval=copy.deepcopy(search_meta),
-        sha256=hashlib.sha256(evidence_pack.encode("utf-8")).hexdigest(),
+        sha256=hashlib.sha256(raw_evidence_pack.encode("utf-8")).hexdigest(),
     )
     (record_dir / "evidence-bundle.json").write_text(
         json.dumps(evidence_bundle.manifest(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    base_prompt = research_prompt(record, evidence_bundle.text)
+    base_prompt = research_prompt(record, evidence_bundle.text, catalog_products=catalog_products)
     orchestration = orchestrate_assessment(
         run_lead=lambda: _run_validated_candidate(
             role="lead",
@@ -3390,7 +3624,12 @@ def research_one(
         should_run_recall=_needs_low_score_review,
         run_recall=lambda _kind, lead: _run_validated_candidate(
             role="recall",
-            prompt=recall_candidate_prompt(base_prompt, lead.assessment or {}, lead.score or 0),
+            prompt=recall_candidate_prompt(
+                record,
+                evidence_bundle.text,
+                lead.assessment or {},
+                lead.score or 0,
+            ),
             record_dir=record_dir,
             hermes=hermes,
             timeout=timeout,
@@ -3418,17 +3657,28 @@ def research_one(
     status = "valid" if selected.valid else "failed"
     zero_score_review = orchestration.review
     errors = [] if status == "valid" else list(selected.errors)
+    semantic_call_count = (
+        len(attempts)
+        + int(router_metadata["called"])
+        + int(evidence_agent_metadata["called"])
+    )
     orchestration_manifest = {
-        "version": "v1",
+        "version": "v2",
         "evidence_sha256": evidence_bundle.sha256,
         "selected_role": selected.role,
         "lead_score": zero_score_review.get("initial_score"),
         "recall_score": zero_score_review.get("review_score"),
-        "agent_call_count": len(attempts),
+        "agent_call_count": semantic_call_count,
         "role_call_counts": {
-            role: sum(attempt.get("role") == role or attempt.get("kind") == role for attempt in attempts)
-            for role in ("lead", "recall", "arbiter")
+            "evidence": int(evidence_agent_metadata["called"]),
+            "catalog_router": int(router_metadata["called"]),
+            **{
+                role: sum(attempt.get("role") == role or attempt.get("kind") == role for attempt in attempts)
+                for role in ("lead", "recall", "arbiter")
+            },
         },
+        "evidence_agent": evidence_agent_metadata,
+        "catalog_router": router_metadata,
         "arbitration": (
             {
                 "decision": orchestration.arbitration.decision,
@@ -3462,10 +3712,12 @@ def research_one(
         "anysearch": search_meta,
         "research": {
             **(invocation.get("attempt") or {}),
-            "orchestration_version": "v1",
+            "orchestration_version": "v2",
             "selected_role": selected.role,
-            "agent_call_count": len(attempts),
+            "agent_call_count": semantic_call_count,
             "role_call_counts": orchestration_manifest["role_call_counts"],
+            "evidence_agent": evidence_agent_metadata,
+            "catalog_router": router_metadata,
             "attempt_count": len(attempts),
             "max_attempts": max_attempts,
             "attempts": attempts,

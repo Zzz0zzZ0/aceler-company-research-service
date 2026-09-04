@@ -1,6 +1,10 @@
 import unittest
 
-from company_research_trial.structured_evidence import extraction_prompt, prepare_structured_evidence
+from company_research_trial.structured_evidence import (
+    compact_evidence_pack,
+    extraction_prompt,
+    prepare_structured_evidence,
+)
 
 
 RAW = """# Evidence
@@ -55,6 +59,32 @@ class StructuredEvidenceTests(unittest.TestCase):
         self.assertNotIn("operates an EAF", result["evidence_pack"])
         self.assertIn("Original evidence for semantic assessment", result["evidence_pack"])
         self.assertIn("manufactures refractory [castables]", result["evidence_pack"])
+
+    def test_decision_evidence_keeps_verified_facts_but_not_quotes_or_raw_pages(self):
+        result = prepare_structured_evidence(
+            {
+                "company": "Example",
+                "identity_status": "confirmed",
+                "core_business_confirmed": True,
+                "facts": [
+                    {
+                        "category": "process",
+                        "statement": "The company manufactures refractory castables.",
+                        "evidence": [{"source_id": "S1", "quote": "manufactures refractory castables"}],
+                    }
+                ],
+                "unresolved": ["Supplier is private"],
+            },
+            RAW,
+        )
+        compact = compact_evidence_pack(result["evidence_pack"])
+        self.assertIn("The company manufactures refractory castables.", compact)
+        self.assertIn("Evidence IDs: S1", compact)
+        self.assertIn("URL: https://example.test/process", compact)
+        self.assertIn("Supplier is private", compact)
+        self.assertNotIn("exact quote:", compact)
+        self.assertNotIn("Original evidence for semantic assessment", compact)
+        self.assertNotIn("manufactures refractory [castables]", compact)
 
     def test_failed_quote_extraction_does_not_block_semantic_scoring(self):
         result = prepare_structured_evidence(

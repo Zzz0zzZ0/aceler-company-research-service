@@ -69,7 +69,9 @@ printf '%s\n' '{"name":"Hatria","website":"https://hatria.com"}' \
 
 stdout 始终只有一个 JSON 对象。退出码 `0` 表示 `valid`，`1` 表示背调完成但结果为 `failed`，`2` 表示输入或运行配置错误。请求只接受 `name`、`website`、`linkedin_url`；调用仍会在 `outputs/company-research-trial/<UTC时间>-api-n001/` 保留完整审计产物。
 
-每家公司流程固定为：来源中立的 identity seed（可只有公司名）→ AnySearch 批量检索主体/产品与工厂/工艺并提取最多 3 页 → 不可变 `EvidenceBundle` → Lead → 条件 Recall Critic → 按需 Arbiter → 仓库 validator。输入字段只是待核验线索；公司角色、工艺和产品映射以本次证据包为准。AnySearch 证据包只采集一次，Recall 和 Arbiter 禁止搜索。Lead 或校验失败时默认最多尝试 3 次，可用 `--max-attempts 1` 关闭重试。重试只修正 JSON、枚举和证据引用，不自动放行；每轮保留独立的 raw、usage、`evidence-bundle.json` 和 `orchestration.json` 审计文件。
+每家公司流程固定为：来源中立的 identity seed（可只有公司名）→ AnySearch 批量检索主体/产品与工厂/工艺并提取最多 3 页 → 长页面 Evidence Agent 引文核验与事实压缩 → Catalog Router 召回优先选取相关产品行 → Lead → 条件 Recall Critic → 按需 Arbiter → 仓库 validator。各角色只获得完成自己任务所需的上下文：Lead 不再接收整页原文和全部产品规则；Recall 独立使用完整产品矩阵审计 Router 漏选；Arbiter 只看争议产品规则和两份候选。原始证据仍保存在审计文件中，不用业务正则替代模型做语义判断。
+
+输入字段只是待核验线索；公司角色、工艺和产品映射以本次证据包为准。AnySearch 证据包只采集一次，后续 Agent 禁止搜索。Lead 或校验失败时默认最多尝试 3 次，可用 `--max-attempts 1` 关闭重试。重试只修正 JSON、枚举和证据引用，不自动放行；每轮保留独立的 raw、usage、`evidence-bundle.json` 和 `orchestration.json` 审计文件。
 
 主 Hermes 调用必须直接用中文填写所有展示性自由文本，并保留公司/人名、产品专名、牌号、工艺缩写、数字和单位。Validator 完成后，系统剔除这些允许保留的英文专名；只有仍检测到英文说明时才执行一次失败开放的中文本地化。原始 canonical assessment、分数、枚举、证据 ID、URL 和产品字段保持不变；翻译结果单独写入 `display_assessment` 与 `localized-assessment.json`，仅供报告和看板使用。翻译超时、输出结构变化或受保护术语被改动时直接显示原文，不改变背调状态或主调用结果。
 

@@ -132,3 +132,25 @@ def prepare_structured_evidence(extraction: dict[str, Any], evidence_pack: str) 
         "warnings": warnings,
         "evidence_pack": "\n".join(lines).strip() + "\n",
     }
+
+
+def compact_evidence_pack(evidence_pack: str) -> str:
+    """Return the verified decision view while leaving raw pages in the audit artifact."""
+    marker = "\n# Original evidence for semantic assessment\n"
+    if marker not in evidence_pack:
+        return evidence_pack.strip()
+    structured = evidence_pack.split(marker, 1)[0]
+    lines = structured.splitlines()
+    first_source = next((index for index, line in enumerate(lines) if line.startswith("## S")), len(lines))
+    compact = [
+        line
+        for index, line in enumerate(lines)
+        if (
+            index == 0
+            or line.startswith("Extractor identity assessment:")
+            or line.startswith("Extractor core-business assessment:")
+            or index >= first_source
+        )
+        and not (line.startswith("- S") and " exact quote: " in line)
+    ]
+    return "\n".join(compact).strip()
