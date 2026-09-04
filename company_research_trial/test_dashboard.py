@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -9,7 +10,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from company_research_trial.dashboard import HTML, DashboardData, make_server
+from company_research_trial.dashboard import DEFAULT_HOST, DEFAULT_PORT, HTML, DashboardData, make_server
 
 
 def _assessment(name: str = "Example Steel") -> dict:
@@ -23,6 +24,10 @@ def _assessment(name: str = "Example Steel") -> dict:
             "evidence_ids": ["S1"],
         },
         "match": {
+            "product_match": 9,
+            "commercial_match": 8,
+            "follow_up": "跟进",
+            "decision_rationale": "Confirmed recurring EAF demand supports follow-up.",
             "confidence": "中",
             "entry_barrier": "高",
             "rationale": "Process and catalog fit are confirmed.",
@@ -72,7 +77,14 @@ def _record(index: int, *, status: str = "valid", assessment: dict | None = None
         },
         "status": status,
         "assessment": assessment,
-        "validation": {"valid": status == "valid", "score": 88, "level": "高"}
+        "validation": {
+            "valid": status == "valid",
+            "score": 88,
+            "level": "高",
+            "product_match": 9,
+            "commercial_match": 8,
+            "follow_up": "跟进",
+        }
         if status == "valid"
         else {"valid": False, "errors": ["Hermes timed out"]},
         "errors": [] if status == "valid" else ["Hermes timed out"],
@@ -85,6 +97,10 @@ def _record(index: int, *, status: str = "valid", assessment: dict | None = None
 
 
 class DashboardDataTests(unittest.TestCase):
+    def test_default_server_is_exposed_on_fixed_lan_port(self) -> None:
+        self.assertEqual(DEFAULT_HOST, "0.0.0.0")
+        self.assertEqual(DEFAULT_PORT, 8766)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -156,6 +172,12 @@ class DashboardDataTests(unittest.TestCase):
         self.assertEqual(company["score"], 88)
         self.assertEqual(company["level"], "高")
         self.assertEqual(company["assessment"]["match"]["components"]["catalog_fit"], 26)
+        self.assertEqual(company["product_match"], 9)
+        self.assertEqual(company["commercial_match"], 8)
+        self.assertEqual(company["follow_up"], "跟进")
+        self.assertIn("产品匹配", HTML)
+        self.assertIn("商业匹配", HTML)
+        self.assertIn("最终建议", HTML)
         self.assertEqual(company["assessment"]["procurement_directions"][0]["product"], "Graphite Electrode")
         self.assertNotIn("usage", json.dumps(payload, ensure_ascii=False))
 
@@ -182,7 +204,10 @@ class DashboardHTTPTests(unittest.TestCase):
         (run / "result.json").write_text(
             json.dumps(_record(1, assessment=None)), encoding="utf-8"
         )
-        self.server = make_server("127.0.0.1", 0, root)
+        self.previous_anysearch_key = os.environ.get("ANYSEARCH_API_KEY")
+        self.env_file = Path(self.temp.name) / "local.env"
+        self.env_file.write_text("OTHER_SETTING=preserved\nANYSEARCH_API_KEY=old-test-key-1234\n", encoding="utf-8")
+        self.server = make_server("127.0.0.1", 0, root, anysearch_env_file=self.env_file)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
@@ -191,6 +216,10 @@ class DashboardHTTPTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
+        if self.previous_anysearch_key is None:
+            os.environ.pop("ANYSEARCH_API_KEY", None)
+        else:
+            os.environ["ANYSEARCH_API_KEY"] = self.previous_anysearch_key
         self.temp.cleanup()
 
     def _post(self, path: str, body: object, content_type: str = "application/json") -> tuple[int, dict]:
@@ -287,6 +316,24 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertEqual(status, 413)
         self.assertEqual(payload["error"], "request_too_large")
 
+    def test_anysearch_key_endpoint_masks_and_atomically_updates_local_env(self) -> None:
+        with urlopen(self.base + "/api/settings/anysearch") as response:
+            initial = json.load(response)
+        self.assertEqual(initial, {"configured": True, "masked": "••••1234"})
+
+        new_key = "new-test-key-9876"
+        status, payload = self._post("/api/settings/anysearch", {"api_key": new_key})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"configured": True, "masked": "••••9876", "updated": True})
+        self.assertNotIn(new_key, json.dumps(payload))
+        self.assertIn("OTHER_SETTING=preserved", self.env_file.read_text(encoding="utf-8"))
+        self.assertIn("ANYSEARCH_API_KEY=new-test-key-9876", self.env_file.read_text(encoding="utf-8"))
+        self.assertEqual(os.environ["ANYSEARCH_API_KEY"], new_key)
+
+        status, payload = self._post("/api/settings/anysearch", {"api_key": "short"})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "invalid_api_key")
+
     def test_manual_research_allows_only_one_in_flight(self) -> None:
         started = threading.Event()
         release = threading.Event()
@@ -328,6 +375,7 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertIn("loadRun(body.run_id)", HTML)
         self.assertIn("openResearch", HTML)
         self.assertIn("closeResearch", HTML)
+
 
 
 if __name__ == "__main__":

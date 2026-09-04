@@ -61,18 +61,30 @@ Use this matrix after confirming the target company's actual process. A listed a
 | Chamotte | Calcined fireclay aggregate in refractory bricks/monolithics, sanitaryware, ceramic bodies, or kiln furniture | Not raw plastic fireclay or generic clay trading |
 | Mullite | Refractory bricks/castables, investment-casting shell, or kiln furniture for ceramic/glass/heat-treatment processes | Distinguish powder/aggregate from finished kiln furniture and from cordierite-mullite composites |
 | Fumed Silica | Documented rheology, thixotropy, reinforcement, anti-sag, anti-caking, matting, filler, or specialty-concrete formulation | Not ferrosilicon/silicon-metal silica fume or microsilica; generic ready-mix evidence is insufficient |
-| Calcined Alpha Alumina | Refractory matrix filler, brick/castable/ramming/gunning formulation, technical ceramics, or documented abrasive/polishing product | Not tabular alumina, reactive alumina, WFA, or unspecified alumina |
+| Calcined Alpha Alumina | Explicit calcined alumina / calcined aluminum oxide (including soft-calcined or hard/sharp-calcined grades), refractory matrix filler, brick/castable/ramming/gunning formulation, technical ceramics, or documented abrasive/polishing product | Not tabular alumina, reactive alumina, WFA, or merely unspecified alumina |
 | Calcium Aluminate Cement & PAC | Only after disambiguation: CAC for refractory/specialty construction binders; PAC/PACl for water-treatment coagulation | Keep ambiguous and low-confidence until chemistry/SDS and end process identify one route |
+
+Confirmed PAC/PACl manufacture/resale, recurring use, or EPC supply/procurement/specification is a catalog route independent of refractories or a public PO. Generic water treatment without company-specific PAC/PACl evidence is insufficient; never confuse it with CAC.
 
 ## Process mapping rules
 
-These are qualification routes, not proof that a named company buys the product.
+Company-specific output, process, formulation, service, or portfolio evidence may support a coherent `推测` route without a public bill of materials or purchase record. Strength depends on how specific and central the activity is; an industry label or remote adjacency is insufficient.
+
+Catalog overlap includes supply, channel, portfolio, and technical-cooperation value. Score application, breadth, throughput, recurrence, and role; upstream or competitive status is not a zero-score reason.
+
+For a confirmed distributor or trader of catalog materials, resale establishes recurring sourcing and customer access. Supplier secrecy or competitive overlap belongs in confidence and entry barrier. Score downstream applications, portfolio breadth, material flow, recurrence, and channel role.
+
+For a confirmed foundry-consumable formulator, evaluate formulation inputs and evidenced agency/distribution products. Private recipes keep exact inputs `推测`; they do not erase the confirmed process or material relevance.
 
 ### Refractory manufacturer
 
 Potential raw-material directions include silicon carbide, dead burned magnesite, fused magnesite, tabular alumina, brown/white fused alumina, bauxite, chamotte, mullite, high alumina cement, calcium aluminate, spinel, calcined alpha alumina, and steel fiber. Steel rod is application-dependent and requires confirmation of its lining, anchoring, or reinforcement use. Match every direction to the manufacturer's actual shaped/unshaped product range and chemistry. Magnesia bricks and magnesia carbon bricks are finished-product opportunities only when it distributes or consumes bricks rather than making competing bricks itself. Treat `Calcium Aluminate Cement & PAC` as ambiguous until the prospect confirms whether the need is refractory cement or polyaluminium chloride.
 
 A company-specific refractory product family is enough to establish the relevant manufacturing process and a technical raw-material route; it is not proof of the exact input or purchase. Score the process/catalog fit from that supported product family, keep the raw-material direction `推测`, and ask for formulation, grade, supplier, and purchasing details. Do not reduce the product/process score merely because those private details are absent.
+
+Alumina-rich polycrystalline wool or vacuum-formed refractory fiber shapes support a Calcined Alpha Alumina raw-material route. Keep the grade/purchase `推测`; finished-shape sales or competition do not make it remote adjacency.
+
+Official soft-calcined or hard/sharp-calcined alumina grades directly overlap Calcined Alpha Alumina. Score an upstream producer's supply/portfolio route, scale, and recurrence; do not invent buyer demand or confuse its separate reactive grades with the calcined grades.
 
 ### Steelmaking
 
@@ -86,6 +98,10 @@ A company-specific refractory product family is enough to establish the relevant
 
 A company-specific metal melting and casting operation establishes a non-zero foundry refractory/consumable route even when public sources omit the furnace type, lining chemistry, or supplier. Do not invent a precise consumable: use the confirmed casting subtype to select only defensible directions, mark unresolved directions `推测` or `公开资料未确认`, and ask for furnace, alloy, mould, lining, and purchase details.
 
+Company-specific non-ferrous smelting, refining, remelting, or hot metal recycling establishes a non-zero recurring furnace-lining route. An undisclosed lining design or supplier lowers product confidence but does not erase the confirmed high-temperature process, industrial consumption, or maintenance cycle. Keep directions technically defensible and ask for furnace, temperature, slag, campaign life, and lining system.
+
+Confirmed continuous furnaces or kilns for glass, mineral wool/fibre, ceramics, cement, lime, or other high-temperature transformation establish non-zero lining need, maintenance consumption, and recurrence. Missing supplier or lining details limit exact catalog directions, not the confirmed process.
+
 - Investment casting: wax for precision casting and ceramic core can be direct consumable directions; confirm alloy, process, dimensions, and core system.
 - Investment-casting shell: fused silica, white fused alumina, and mullite can be technical raw-material directions when the company's shell flour/stucco system is evidenced; confirm binder, layer, particle size, alloy, and firing conditions.
 - Metal pouring/gating: sprue cup / sprue bowl and aluminum silicon ceramic crucible can be relevant; confirm metal, temperature, capacity, and current consumable type.
@@ -97,11 +113,17 @@ Primary directions are silicon carbide, brown fused alumina, and white fused alu
 
 For a confirmed manufacturer of bonded, coated, or nonwoven abrasives, grinding wheels, cutting discs, or polishing media, official evidence that its products use silicon carbide, aluminum oxide/corundum, or white/brown alumina establishes product/process fit and recurring technical consumption. These grains are relevant production inputs even though they become internal components of the finished abrasive product. Do not require a public supplier or purchase record to recognize that fit; keep the procurement direction `推测` unless the exact input or purchase is directly evidenced. Distinguish manufacturers from tool-only resellers and distributors.
 
+Confirmed abrasive/shot blasting or abrasive surface preparation establishes recurring blast-media consumption. Internal consumption is a procurement route, not a zero-score reason. If chemistry is undisclosed, score process, consumption, recurrence, and end-user role without claiming a specific catalog grain; ask for media, grit, reuse, throughput, and supplier.
+
 Diamond, CBN, tungsten-carbide, superabrasive, cutting-tool, or polishing-tool adjacency alone does not establish use of Silicon Carbide, Brown Fused Alumina, or White Fused Alumina. Require company-specific evidence of the mapped grain, abrasive composition, or corresponding manufacturing process before adding those directions or awarding catalog fit.
 
 ### Ceramics
 
 Possible directions include fused silica, calcined alpha alumina, tabular alumina, brown/white fused alumina, bauxite, mullite, spinel, silicon carbide, and ceramic components. Confirm body composition, firing temperature, purity, particle-size distribution, thermal-shock need, and whether the company buys raw material or finished components.
+
+Catalog-mapped high-purity technical ceramics retain product fit when specifications or purchases are private; reduce only for evidenced conflict. Other unknown ceramic composition is weak and `推测` and does not prove purchase.
+
+A government or registry classification naming sanitaryware or other specific ceramic manufacture can support a low-confidence partial positioning and weak semantic relevance unless reliable current evidence contradicts it; it does not confirm a current production line or exact input.
 
 ### Cement and lime
 
@@ -109,17 +131,17 @@ Focus on high-temperature kiln/calciner linings rather than assuming the company
 
 ### Ready-mix and specialty concrete
 
-Steel Fiber is a direct technical direction for fiber-reinforced concrete, subject to confirming that the producer offers or formulates that product class and that Aceler's dimensions and performance fit. A confirmed generic ready-mix producer therefore retains a low, conditional Steel Fiber opportunity even when its public catalog does not show fiber-reinforced concrete; mark it low priority and `推测`, not zero or `已确认`. Fumed Silica may fit specialty or ultra-high-performance concrete only after confirming the exact grade and formulation; do not confuse fumed silica with the more common silica fume/microsilica. Calcium aluminate or high alumina cement can fit rapid-setting, repair, heat-resistant, or other specialty concrete only with a corresponding product/application signal. Do not add these specialty directions from generic ready-mix evidence alone.
+Steel Fiber is a direct direction only for confirmed fibre-reinforced concrete; generic ready-mix supports a weak `推测`, not zero or `已确认`. Fumed Silica requires a specialty/UHPC formulation and must not be confused with silica fume/microsilica. Calcium/high-alumina cement requires a rapid-set, repair, or heat-resistant product signal. Confirm grade, formulation, dimensions, and performance.
 
 ### Engineering, refractory service, and industrial equipment
 
 Treat as a potential project/channel route first. Raw-material fit becomes stronger only when the company formulates monolithics, produces precast shapes, buys installation materials, specifies brands, or procures on behalf of an owner. A confirmed induction-melting application creates a non-zero technical route for Aluminum Silicon Ceramic Crucible and, depending on furnace design and lining chemistry, fused silica, mullite, silicon carbide, tabular alumina, calcium-aluminate/high-alumina binders, and steel fiber. Do not recommend Graphite Electrode for induction equipment. Identify the end-user process, furnace/lining design, whether the OEM supplies or specifies the consumable package, and who holds the purchase order.
 
-Confirmed delivery, installation, repair, formulation, specification control, or distribution of relevant materials establishes company-role/channel fit even if no public source names the purchase-order holder. Keep direct raw-material buying unconfirmed, but do not erase the evidenced channel route or score it as zero.
+Confirmed delivery or distribution of relevant materials, formulation, refractory installation/repair that includes material supply, or control of material specifications establishes company-role/channel fit even if no public source names the purchase-order holder. Generic furnace engineering, equipment manufacture, maintenance, construction, installation, or customer-industry access without a company-specific material role is only project adjacency; do not spread that adjacency across all five components. Keep direct raw-material buying unconfirmed, but do not erase a genuinely evidenced channel route or score it as zero.
 
 ### Feed, fertilizer, chemical, paper, paint, plastic, rubber, medicine, and electrical applications
 
-Caustic calcined magnesite is relevant to iron-ore pellet, active-MgO chemical/building-material, synthetic-spinel, feed, or fertilizer routes only after the applicable process, grade, chemistry, regulation, and end use are confirmed. Fumed silica may fit rheology, reinforcement, anti-caking, matting, or filler applications, but require an official product/process link and confirm grade and specification. `Calcium Aluminate Cement & PAC` may fit refractory/specialty-construction cement or PAC/PACl water-treatment coagulation; do not choose between them without confirming the chemical identity, SDS, and process. Other minerals may have filler, chemical, thermal, or electrical uses, but do not infer them from the industry label; require an official product/process link and confirm Aceler's suitable grade.
+CCM needs a confirmed pellet, active-MgO, building-material, spinel, feed, or fertilizer process plus grade and end use. Fumed silica needs an official rheology, reinforcement, anti-caking, matting, or filler link. For CAC versus PAC/PACl, confirm chemistry/SDS and process. Do not infer other minerals from an industry label alone.
 
 ## Disqualifiers and cautions
 

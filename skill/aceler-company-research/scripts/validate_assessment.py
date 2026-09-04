@@ -10,10 +10,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-ROLES = {"终端用户", "耐材生产商", "贸易商", "分销商", "工程公司", "同行", "其他/公开资料不足"}
-RELATIONSHIPS = {"潜在客户", "渠道合作伙伴", "同行", "低匹配客户"}
+ROLES = {"终端用户", "耐材生产商", "材料生产商", "贸易商", "分销商", "工程公司", "同行", "其他/公开资料不足"}
+RELATIONSHIPS = {"潜在客户", "渠道合作伙伴", "供应合作伙伴", "产品组合合作伙伴", "同行", "低匹配客户"}
 LEVELS = {"高", "中", "低"}
 EVIDENCE_STATES = {"已确认", "推测", "公开资料未确认"}
+FOLLOW_UP_DECISIONS = {"跟进", "淘汰"}
 SOURCE_TYPES = {"官网", "官方领英", "政府/注册", "公司文件", "项目业主/政府", "行业组织", "可靠媒体", "其他"}
 CATALOG_PRODUCTS = {
     "Dead Burned Magnesite",
@@ -100,6 +101,11 @@ def validate(data: dict[str, Any]) -> dict[str, Any]:
             errors.append(f"sources[{index}].url must be an http(s) URL")
         if source.get("source_type") not in SOURCE_TYPES:
             errors.append(f"sources[{index}].source_type is invalid")
+        source_host = (urlparse(str(source.get("url") or "")).hostname or "").casefold().removeprefix("www.")
+        if source.get("source_type") == "官方领英" and not (
+            source_host == "linkedin.com" or source_host.endswith(".linkedin.com")
+        ):
+            errors.append(f"sources[{index}].source_type 官方领英 requires a linkedin.com URL")
 
     positioning = data.get("company_positioning")
     if not isinstance(positioning, dict) or not str(positioning.get("text", "")).strip():
@@ -129,6 +135,18 @@ def validate(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(match, dict):
         errors.append("match must be an object")
         match = {}
+    decision_scores: dict[str, int] = {}
+    for field in ("product_match", "commercial_match"):
+        value = match.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10:
+            errors.append(f"match.{field} must be an integer from 0 to 10")
+        else:
+            decision_scores[field] = value
+    follow_up = match.get("follow_up")
+    if follow_up not in FOLLOW_UP_DECISIONS:
+        errors.append("match.follow_up must be 跟进 or 淘汰")
+    if not str(match.get("decision_rationale", "")).strip():
+        errors.append("match.decision_rationale must be non-empty")
     components = match.get("components")
     if not isinstance(components, dict):
         errors.append("match.components must be an object")
@@ -202,12 +220,21 @@ def validate(data: dict[str, Any]) -> dict[str, Any]:
         warnings.append("research marked complete without official core evidence")
     if match.get("confidence") == "高" and (identity == "ambiguous" or match.get("official_core_evidence") is False):
         warnings.append("review high confidence with ambiguous identity or missing official core evidence")
+    product_match = decision_scores.get("product_match")
+    commercial_match = decision_scores.get("commercial_match")
+    if follow_up == "跟进" and product_match is not None and commercial_match is not None and min(product_match, commercial_match) < 4:
+        warnings.append("review follow-up decision with a product or commercial score below 4")
+    if follow_up == "淘汰" and product_match is not None and commercial_match is not None and min(product_match, commercial_match) >= 5:
+        warnings.append("review elimination decision when both product and commercial scores are at least 5")
 
     return {
         "valid": not errors,
         "raw_total": total,
         "score": score,
         "level": level,
+        "product_match": product_match,
+        "commercial_match": commercial_match,
+        "follow_up": follow_up if follow_up in FOLLOW_UP_DECISIONS else None,
         "errors": errors,
         "warnings": warnings,
     }
@@ -238,6 +265,10 @@ def make_case(*, high: bool = True, induction_graphite: bool = False) -> dict[st
             "evidence_ids": ["S1"],
         },
         "match": {
+            "product_match": 9 if high else 2,
+            "commercial_match": 8 if high else 2,
+            "follow_up": "跟进" if high else "淘汰",
+            "decision_rationale": "Self-test decision rationale.",
             "components": {
                 "production_process_need": 28 if high else 8,
                 "catalog_fit": 26 if high else 5,
@@ -280,12 +311,18 @@ def self_test() -> int:
     retired_product_case = make_case(high=False)
     retired_product_case["procurement_directions"][0]["product"] = "Ferro Silicon Nitride (HS Code 28500019)"
     retired_product = validate(retired_product_case)
+    supply_case = make_case(high=True)
+    supply_case["role_judgment"]["operational_role"] = "材料生产商"
+    supply_case["role_judgment"]["commercial_relationship"] = "供应合作伙伴"
+    supply_case["role_judgment"]["secondary_relationship"] = "产品组合合作伙伴"
+    supply = validate(supply_case)
     checks = [
         (high["valid"] and high["score"] == 85 and high["level"] == "高", "high EAF case"),
         (low["valid"] and low["score"] == 20 and low["level"] == "低", "low product-fit case"),
         (semantic_case["valid"], "business semantics are not a structural gate"),
         (new_product["valid"], "new catalog product case"),
         (not retired_product["valid"], "retired catalog product case"),
+        (supply["valid"], "material producer and supply-side relationship case"),
     ]
     failed = [name for passed, name in checks if not passed]
     result = {"valid": not failed, "tests": len(checks), "failed": failed}

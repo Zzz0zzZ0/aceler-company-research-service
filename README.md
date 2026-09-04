@@ -75,7 +75,7 @@ stdout 始终只有一个 JSON 对象。退出码 `0` 表示 `valid`，`1` 表�
 
 首次合法结果恰好为 0% 时，系统默认使用同一证据包和首次 JSON 做一次独立复核，专门排查生产投入、高温耗材和技术渠道是否被遗漏。复核可以维持 0%，不会触发新搜索，也不会重复复核；复核输出无效时保留首次合法结果。临时关闭时在运行命令中加入 `--no-zero-review`。
 
-Hermes prompt 使用 `$aceler-company-research` 与唯一 JSON skeleton。评分完全采用产品/工艺主导的五维：`production_process_need`（0–30）、`catalog_fit`（0–30）、`consumption_intensity`（0–20）、`demand_recurrence`（0–10）、`company_role_fit`（0–10），总分向下取 5。采购可能性、供应商、认证、准入、地域和来源数量只记录在证据状态、置信度、研究状态、进入门槛或下一步问题中，不改变产品匹配分。
+Hermes prompt 使用 `$aceler-company-research` 与唯一 JSON skeleton。Hermes 基于完整证据做五维语义评分：`production_process_need`（0–30）、`catalog_fit`（0–30）、`consumption_intensity`（0–20）、`demand_recurrence`（0–10）、`company_role_fit`（0–10），validator 只验范围并求和后向下取 5。评分覆盖直接消耗、分销、工程/规格影响、互补供应和产品组合合作；已确认的公司产品/工艺可支持合理工业推断，未公开采购或私有配方只降低置信度，不把已成立的路径清零。行业标签或遥远邻接关系本身仍不加分。
 
 产品名称必须来自固定 26 项目录。Graphite Electrode 需要确认 EAF；感应炉不使用石墨电极，镁质方向在没有衬里化学时只能写有依据的推测、低优先级并提出确认问题，不能标为已确认。不能为了填表发明没有官网依据的产品方向。
 
@@ -104,13 +104,24 @@ python3 -m py_compile company_research_trial/company_research_trial.py company_r
 python3 -m company_research_trial.dashboard
 ```
 
-默认监听 `127.0.0.1:8765`。看板只读扫描本地 `result.json`，直接读取 validator 生成的 `score` 与 `level`。
+默认监听 `0.0.0.0:8766`，可以通过启动时显示的当前局域网 IP 和端口访问。看板只读扫描本地 `result.json`，直接读取 validator 生成的 `score` 与 `level`。
 看板采用左侧公司队列、右侧研究详情的并排审阅布局；结果区保持只读，“新建背调”抽屉可以提交一家公司。公司名必填，官网和 LinkedIn 可选，提交内容只包含 `name`、`website`、`linkedin_url` 三个字段，不读取或写入 CRM。一次只允许一个手工背调任务，完成后自动刷新并打开新的运行批次；CLI 返回失败状态但已生成合法结果时，失败结果仍可在看板查看。
 
-需要让同一局域网中的设备访问时，显式监听全部网络接口：
+AnySearch key 可通过仅限本机的设置接口更换；接口只返回尾 4 位掩码，完整 key 不会出现在响应中：
 
 ```bash
-python3 -m company_research_trial.dashboard --host 0.0.0.0 --port 8765
+curl http://127.0.0.1:8766/api/settings/anysearch
+curl -X POST http://127.0.0.1:8766/api/settings/anysearch \
+  -H 'Content-Type: application/json' \
+  -d '{"api_key":"替换为新的-key"}'
 ```
 
-`0.0.0.0` 会暴露该端口；仅在可信网络和防火墙规则明确时使用。默认值仍保持为更安全的 `127.0.0.1`。
+更新会原子写入 `config/local.env` 并刷新看板进程环境；之后新启动的背调任务使用新 key，已在运行的独立批次不会被中途切换。
+
+只需要限制为本机访问时，显式监听回环接口：
+
+```bash
+python3 -m company_research_trial.dashboard --host 127.0.0.1 --port 8766
+```
+
+默认的 `0.0.0.0` 会向当前网络暴露看板；建议仅在可信局域网中使用。AnySearch Key 设置接口仍只允许本机回环请求。

@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Small local dashboard for company-research trial results.
 
-Results remain read-only.  The only write-like action is a bounded, explicit
-single-company research request which delegates to the existing CLI.
+Results remain read-only. Write actions are limited to a bounded single-company
+research request and local AnySearch credential replacement.
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -24,8 +27,9 @@ from urllib.parse import unquote, urlsplit
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_ROOT = PROJECT_DIR / "outputs" / "company-research-trial"
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8765
+DEFAULT_ENV_FILE = PROJECT_DIR / "config" / "local.env"
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 8766
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _INDUSTRIES = {
@@ -40,9 +44,28 @@ _INDUSTRIES = {
 _STATUS_LABELS = {"valid": "有效", "failed": "失败"}
 _MAX_TEXT = 6000
 _MAX_RESEARCH_BODY = 16 * 1024
+_MAX_SETTINGS_BODY = 2 * 1024
 _MAX_RESEARCH_NAME = 400
 _MAX_RESEARCH_URL = 2000
 _RESEARCH_FIELDS = {"name", "website", "linkedin_url"}
+
+
+def _lan_ipv4() -> str:
+    for interface in ("en0", "en1", "en2", "en3"):
+        try:
+            result = subprocess.run(
+                ["ipconfig", "getifaddr", interface],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+            address = ipaddress.ip_address(result.stdout.strip())
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            continue
+        if address.version == 4 and not address.is_loopback:
+            return str(address)
+    return ""
 
 
 def _text(value: Any, limit: int = _MAX_TEXT) -> str:
@@ -197,6 +220,10 @@ def _module_assessment(
         "match": {
             "score": validation_score,
             "level": validation_level or "未评分",
+            "product_match": _number(validation.get("product_match")) if isinstance(validation, dict) else None,
+            "commercial_match": _number(validation.get("commercial_match")) if isinstance(validation, dict) else None,
+            "follow_up": _text(validation.get("follow_up"), 40) if isinstance(validation, dict) else "",
+            "decision_rationale": _text(match.get("decision_rationale")),
             "confidence": _text(match.get("confidence"), 80) or "未确认",
             "entry_barrier": _text(match.get("entry_barrier"), 80) or "未确认",
             "rationale": _text(match.get("rationale")),
@@ -283,6 +310,9 @@ class DashboardData:
             or "未判断",
             "score": score,
             "level": level,
+            "product_match": _number(validation.get("product_match")),
+            "commercial_match": _number(validation.get("commercial_match")),
+            "follow_up": _text(validation.get("follow_up"), 40) or "未判断",
             "confidence": _text(match.get("confidence"), 80) or "未确认",
             "entry_barrier": _text(match.get("entry_barrier"), 80) or "未确认",
             "status": status,
@@ -451,6 +481,11 @@ def _parse_research_payload(payload: Any) -> dict[str, str]:
 
 
 def _read_research_payload(handler: BaseHTTPRequestHandler) -> dict[str, str]:
+    payload = _read_json_payload(handler, _MAX_RESEARCH_BODY)
+    return _parse_research_payload(payload)
+
+
+def _read_json_payload(handler: BaseHTTPRequestHandler, max_bytes: int) -> Any:
     if handler.headers.get_content_type() != "application/json":
         raise _ResearchInputError(
             HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
@@ -466,11 +501,11 @@ def _read_research_payload(handler: BaseHTTPRequestHandler) -> dict[str, str]:
         raise _ResearchInputError(
             HTTPStatus.BAD_REQUEST, "invalid_content_length", "请求体长度无效"
         )
-    if content_length > _MAX_RESEARCH_BODY:
+    if content_length > max_bytes:
         raise _ResearchInputError(
             HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             "request_too_large",
-            f"请求体不能超过 {_MAX_RESEARCH_BODY} 字节",
+            f"请求体不能超过 {max_bytes} 字节",
         )
     try:
         raw = handler.rfile.read(content_length)
@@ -479,7 +514,79 @@ def _read_research_payload(handler: BaseHTTPRequestHandler) -> dict[str, str]:
         raise _ResearchInputError(
             HTTPStatus.BAD_REQUEST, "invalid_json", "请求体必须是有效 JSON"
         ) from None
-    return _parse_research_payload(payload)
+    return payload
+
+
+def _parse_anysearch_key(payload: Any) -> str:
+    if not isinstance(payload, dict) or set(payload) != {"api_key"}:
+        raise _ResearchInputError(
+            HTTPStatus.BAD_REQUEST, "invalid_settings", "请求只接受 api_key",
+        )
+    api_key = payload.get("api_key")
+    if not isinstance(api_key, str):
+        raise _ResearchInputError(HTTPStatus.BAD_REQUEST, "invalid_api_key", "api_key 必须是字符串")
+    api_key = api_key.strip()
+    if not 8 <= len(api_key) <= 512 or any(character.isspace() for character in api_key):
+        raise _ResearchInputError(
+            HTTPStatus.BAD_REQUEST, "invalid_api_key", "api_key 长度必须为 8–512 且不能包含空白字符",
+        )
+    return api_key
+
+
+def _masked_anysearch_key(value: str) -> dict[str, Any]:
+    return {"configured": bool(value), "masked": ("••••" + value[-4:]) if value else ""}
+
+
+def _read_anysearch_key(env_file: Path) -> str:
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        return os.getenv("ANYSEARCH_API_KEY", "")
+    for line in lines:
+        match = re.match(r"^\s*ANYSEARCH_API_KEY\s*=\s*(.*)$", line)
+        if not match:
+            continue
+        try:
+            values = shlex.split(match.group(1), comments=True)
+        except ValueError:
+            return ""
+        return values[0] if values else ""
+    return os.getenv("ANYSEARCH_API_KEY", "")
+
+
+def _write_anysearch_key(env_file: Path, api_key: str) -> None:
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        original = env_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        original = ""
+    lines = original.splitlines()
+    replacement = f"ANYSEARCH_API_KEY={shlex.quote(api_key)}"
+    updated: list[str] = []
+    replaced = False
+    for line in lines:
+        if re.match(r"^\s*ANYSEARCH_API_KEY\s*=", line):
+            if not replaced:
+                updated.append(replacement)
+                replaced = True
+            continue
+        updated.append(line)
+    if not replaced:
+        updated.append(replacement)
+    mode = ((env_file.stat().st_mode & 0o600) or 0o600) if env_file.exists() else 0o600
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=env_file.parent, prefix=f".{env_file.name}.", delete=False
+        ) as handle:
+            handle.write("\n".join(updated).rstrip("\n") + "\n")
+            temporary = Path(handle.name)
+        os.chmod(temporary, mode)
+        temporary.replace(env_file)
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
+    os.environ["ANYSEARCH_API_KEY"] = api_key
 
 
 def _default_research_runner(command: list[str]) -> Any:
@@ -806,7 +913,7 @@ HTML = r"""<!doctype html>
       const directionHtml = assessment?.procurement_directions?.length ? assessment.procurement_directions.map(direction => `<div class="direction"><div class="direction-head"><strong>${esc(direction.product || '未填写')}</strong>${tag(direction.priority || '未定')}</div><p>${esc(direction.application || '')}</p>${direction.basis ? `<p class="subtle">依据：${esc(direction.basis)}</p>` : ''}${direction.evidence_status ? `<p class="subtle">证据状态：${esc(direction.evidence_status)}</p>` : ''}${direction.next_question ? `<p class="subtle">下一步：${esc(direction.next_question)}</p>` : ''}</div>`).join('') : '<p class="subtle">未形成采购方向。</p>';
       const sources = assessment?.sources?.length ? `<ul class="source-list">${assessment.sources.map(link).map(value => `<li>${value}</li>`).join('')}</ul>` : '<p class="subtle">暂无来源链接。</p>';
       const errors = item.errors || [];
-      detail.innerHTML = `<header class="detail-title"><div><h2>${esc(item.name)}</h2><p class="detail-meta">${esc(item.industry)} · ${esc(item.operational_role)} · ${esc(item.commercial_relationship)}</p></div><div class="summary-metrics"><div class="summary-metric"><span>匹配度</span><strong class="score-value mono">${scoreValue(item)}</strong></div><div class="summary-metric"><span>证据置信度</span><strong>${esc(match?.confidence || item.confidence)}</strong></div></div></header><div class="detail-grid"><section class="module"><h3>公司实质定位</h3><p>${esc(pos?.text || '暂无背调定位。')}</p></section><section class="module"><h3>角色判断</h3><dl class="kv"><dt>运营角色</dt><dd>${esc(role?.operational_role || item.operational_role)}</dd><dt>商业关系</dt><dd>${esc(role?.commercial_relationship || item.commercial_relationship)}</dd>${role?.secondary_relationship ? `<dt>次级关系</dt><dd>${esc(role.secondary_relationship)}</dd>` : ''}</dl><p>${esc(role?.reason || '暂无角色依据。')}</p></section><section class="module"><h3>匹配度</h3><div class="match-line"><strong class="mono">${scoreValue(item)}</strong><span>${esc(item.level || '未评分')}</span></div><dl class="kv"><dt>证据置信度</dt><dd>${tag(match?.confidence || item.confidence)}</dd><dt>准入门槛</dt><dd>${tag(match?.entry_barrier || item.entry_barrier)}</dd></dl>${componentHtml}<p>${esc(match?.rationale || '暂无匹配度说明。')}</p></section><section class="module"><h3>主要采购方向</h3>${directionHtml}</section></div><details class="auxiliary"><summary>来源与辅助信息</summary><div class="aux-grid"><section class="aux-block"><h3>来源链接</h3>${sources}</section><section class="aux-block"><h3>已确认信息</h3><dl class="kv"><dt>流程</dt><dd>${esc((assessment?.confirmed_processes || []).join('、') || '未确认')}</dd><dt>衬里系统</dt><dd>${esc((assessment?.confirmed_lining_systems || []).join('、') || '未确认')}</dd></dl></section>${errors.length ? `<section class="aux-block"><h3 class="error">错误 / 失败原因</h3><ul class="error-list">${errors.map(value => `<li>${esc(value)}</li>`).join('')}</ul></section>` : ''}<section class="aux-block"><h3>输入记录</h3><dl class="kv"><dt>公司名</dt><dd>${esc(crm.name || item.name)}</dd><dt>行业</dt><dd>${esc(crm.industry || item.industry)}</dd><dt>官网</dt><dd>${crm.website ? `<a href="${esc(crm.website)}" target="_blank" rel="noopener noreferrer">${esc(crm.website)}</a>` : '未填写'}</dd><dt>LinkedIn</dt><dd>${crm.linkedin_url ? `<a href="${esc(crm.linkedin_url)}" target="_blank" rel="noopener noreferrer">${esc(crm.linkedin_url)}</a>` : '未填写'}</dd><dt>背景</dt><dd>${esc(crm.background || '未填写')}</dd><dt>更新时间</dt><dd>${esc(crm.updated_at || '未填写')}</dd></dl></section></div></details>`;
+      detail.innerHTML = `<header class="detail-title"><div><h2>${esc(item.name)}</h2><p class="detail-meta">${esc(item.industry)} · ${esc(item.operational_role)} · ${esc(item.commercial_relationship)}</p></div><div class="summary-metrics"><div class="summary-metric"><span>产品匹配</span><strong class="score-value mono">${esc(item.product_match ?? '—')}</strong></div><div class="summary-metric"><span>商业匹配</span><strong class="score-value mono">${esc(item.commercial_match ?? '—')}</strong></div><div class="summary-metric"><span>最终建议</span><strong>${esc(item.follow_up || '未判断')}</strong></div></div></header><div class="detail-grid"><section class="module"><h3>公司实质定位</h3><p>${esc(pos?.text || '暂无背调定位。')}</p></section><section class="module"><h3>角色判断</h3><dl class="kv"><dt>运营角色</dt><dd>${esc(role?.operational_role || item.operational_role)}</dd><dt>商业关系</dt><dd>${esc(role?.commercial_relationship || item.commercial_relationship)}</dd>${role?.secondary_relationship ? `<dt>次级关系</dt><dd>${esc(role.secondary_relationship)}</dd>` : ''}</dl><p>${esc(role?.reason || '暂无角色依据。')}</p></section><section class="module"><h3>匹配度</h3><div class="match-line"><strong class="mono">${scoreValue(item)}</strong><span>${esc(item.level || '未评分')}</span></div><dl class="kv"><dt>产品匹配</dt><dd>${esc(item.product_match ?? '—')}/10</dd><dt>商业匹配</dt><dd>${esc(item.commercial_match ?? '—')}/10</dd><dt>最终建议</dt><dd>${tag(item.follow_up || '未判断')}</dd><dt>证据置信度</dt><dd>${tag(match?.confidence || item.confidence)}</dd><dt>准入门槛</dt><dd>${tag(match?.entry_barrier || item.entry_barrier)}</dd></dl>${componentHtml}<p>${esc(match?.decision_rationale || '暂无决策说明。')}</p><p>${esc(match?.rationale || '暂无匹配度说明。')}</p></section><section class="module"><h3>主要采购方向</h3>${directionHtml}</section></div><details class="auxiliary"><summary>来源与辅助信息</summary><div class="aux-grid"><section class="aux-block"><h3>来源链接</h3>${sources}</section><section class="aux-block"><h3>已确认信息</h3><dl class="kv"><dt>流程</dt><dd>${esc((assessment?.confirmed_processes || []).join('、') || '未确认')}</dd><dt>衬里系统</dt><dd>${esc((assessment?.confirmed_lining_systems || []).join('、') || '未确认')}</dd></dl></section>${errors.length ? `<section class="aux-block"><h3 class="error">错误 / 失败原因</h3><ul class="error-list">${errors.map(value => `<li>${esc(value)}</li>`).join('')}</ul></section>` : ''}<section class="aux-block"><h3>输入记录</h3><dl class="kv"><dt>公司名</dt><dd>${esc(crm.name || item.name)}</dd><dt>行业</dt><dd>${esc(crm.industry || item.industry)}</dd><dt>官网</dt><dd>${crm.website ? `<a href="${esc(crm.website)}" target="_blank" rel="noopener noreferrer">${esc(crm.website)}</a>` : '未填写'}</dd><dt>LinkedIn</dt><dd>${crm.linkedin_url ? `<a href="${esc(crm.linkedin_url)}" target="_blank" rel="noopener noreferrer">${esc(crm.linkedin_url)}</a>` : '未填写'}</dd><dt>背景</dt><dd>${esc(crm.background || '未填写')}</dd><dt>更新时间</dt><dd>${esc(crm.updated_at || '未填写')}</dd></dl></section></div></details>`;
     }
     function openResearch() { $('drawer-backdrop').hidden = false; $('app-shell').inert = true; requestAnimationFrame(() => { $('drawer-backdrop').classList.add('open'); $('research-drawer').classList.add('open'); }); $('research-drawer').setAttribute('aria-hidden','false'); $('research-open').setAttribute('aria-expanded','true'); setTimeout(() => $('research-name').focus(),180); }
     function closeResearch() { $('drawer-backdrop').classList.remove('open'); $('research-drawer').classList.remove('open'); $('research-drawer').setAttribute('aria-hidden','true'); $('research-open').setAttribute('aria-expanded','false'); $('app-shell').inert = false; setTimeout(() => { $('drawer-backdrop').hidden = true; $('research-open').focus(); },180); }
@@ -909,6 +1016,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
         finally:
             research_lock.release()
 
+    def _local_settings_request(self) -> bool:
+        try:
+            return ipaddress.ip_address(self.client_address[0]).is_loopback
+        except ValueError:
+            return False
+
+    def _get_anysearch_settings(self) -> None:
+        if not self._local_settings_request():
+            self._json(HTTPStatus.FORBIDDEN, {"error": "local_only"})
+            return
+        env_file = self.server.anysearch_env_file  # type: ignore[attr-defined]
+        self._json(HTTPStatus.OK, _masked_anysearch_key(_read_anysearch_key(env_file)))
+
+    def _set_anysearch_settings(self) -> None:
+        if not self._local_settings_request():
+            self._json(HTTPStatus.FORBIDDEN, {"error": "local_only"})
+            return
+        try:
+            api_key = _parse_anysearch_key(_read_json_payload(self, _MAX_SETTINGS_BODY))
+        except _ResearchInputError as exc:
+            self._json(exc.status, {"error": exc.code, "message": exc.message})
+            return
+        env_file = self.server.anysearch_env_file  # type: ignore[attr-defined]
+        settings_lock = self.server.settings_lock  # type: ignore[attr-defined]
+        try:
+            with settings_lock:
+                _write_anysearch_key(env_file, api_key)
+        except OSError:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "settings_write_failed"})
+            return
+        self._json(HTTPStatus.OK, {**_masked_anysearch_key(api_key), "updated": True})
+
     def do_HEAD(self) -> None:  # noqa: N802
         if urlsplit(self.path).path in {"/", "/index.html"}:
             self._send(HTTPStatus.OK, HTML.encode("utf-8"), "text/html; charset=utf-8")
@@ -923,6 +1062,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/runs":
             self._json(HTTPStatus.OK, {"runs": self.data.runs()})
             return
+        if path == "/api/settings/anysearch":
+            self._get_anysearch_settings()
+            return
         prefix = "/api/runs/"
         if path.startswith(prefix):
             run_id = unquote(path[len(prefix) :])
@@ -936,8 +1078,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if urlsplit(self.path).path == "/api/research":
+        path = urlsplit(self.path).path
+        if path == "/api/research":
             self._research()
+            return
+        if path == "/api/settings/anysearch":
+            self._set_anysearch_settings()
             return
         self._method_not_allowed()
 
@@ -960,13 +1106,16 @@ def make_server(
     port: int = DEFAULT_PORT,
     output_root: str | Path = DEFAULT_OUTPUT_ROOT,
     research_runner: Callable[[list[str]], Any] | None = None,
+    anysearch_env_file: str | Path = DEFAULT_ENV_FILE,
 ) -> ThreadingHTTPServer:
     data = DashboardData(output_root)
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     server.dashboard_data = data  # type: ignore[attr-defined]
     # ponytail: one global manual-task lock; per-user queues are unnecessary for this local dashboard.
     server.research_lock = threading.Lock()  # type: ignore[attr-defined]
+    server.settings_lock = threading.Lock()  # type: ignore[attr-defined]
     server.research_runner = research_runner or _default_research_runner  # type: ignore[attr-defined]
+    server.anysearch_env_file = Path(anysearch_env_file)  # type: ignore[attr-defined]
     return server
 
 
@@ -977,7 +1126,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     args = parser.parse_args(argv)
     server = make_server(args.host, args.port, args.output_root)
-    print(f"Aceler 背调看板: http://{args.host}:{args.port}/")
+    access_host = _lan_ipv4() if args.host in {"0.0.0.0", "::"} else args.host
+    print(f"Aceler 背调看板: http://{access_host or '127.0.0.1'}:{server.server_port}/", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

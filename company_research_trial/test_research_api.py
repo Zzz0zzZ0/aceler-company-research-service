@@ -15,7 +15,14 @@ def valid_assessment() -> dict:
     return {
         "company_positioning": {"text": "Official manufacturer", "evidence_ids": []},
         "role_judgment": {"operational_role": "终端用户", "commercial_relationship": "潜在客户"},
-        "match": {"confidence": "中", "entry_barrier": "中"},
+        "match": {
+            "product_match": 7,
+            "commercial_match": 6,
+            "follow_up": "跟进",
+            "decision_rationale": "A current product and commercial route is supported.",
+            "confidence": "中",
+            "entry_barrier": "中",
+        },
         "procurement_directions": [],
     }
 
