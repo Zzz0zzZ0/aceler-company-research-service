@@ -20,6 +20,7 @@ from company_research_trial.company_research_trial import (
     anysearch_pack,
     recall_first_anysearch_pack,
     anysearch_source_errors,
+    arbitration_prompt,
     child_environment,
     extract_json_object,
     localize_item,
@@ -27,6 +28,7 @@ from company_research_trial.company_research_trial import (
     read_candidates,
     research_one,
     research_prompt,
+    recall_candidate_prompt,
     low_score_review_prompt,
     zero_score_review_prompt,
     run_anysearch_cli,
@@ -1708,6 +1710,19 @@ class SeamTests(unittest.TestCase):
             "zero-score review must guard against superabrasive adjacency false positives",
         )
 
+    def test_arbiter_receives_exact_disputed_product_rules_without_the_full_catalog(self) -> None:
+        lead = assessment()
+        recall = assessment()
+        recall["procurement_directions"] = [
+            {**recall["procurement_directions"][0], "product": "Fumed Silica"}
+        ]
+        prompt = arbitration_prompt(EVIDENCE, lead, recall)
+        self.assertIn("| Fumed Silica |", prompt)
+        self.assertIn("official rheology", prompt)
+        self.assertIn("行业通常使用", prompt)
+        self.assertIn("绝不能用来新建精确产品", prompt)
+        self.assertNotIn("- Andalusite", prompt)
+
     def test_runtime_memory_keeps_pac_and_high_purity_routes_enabled(self) -> None:
         memory = (PROJECT_DIR / "config" / "hermes" / "aceler-memory" / "MEMORY.md").read_text(encoding="utf-8")
         self.assertNotIn("CAC_PAC、CORE、CHAMOTTE资料状态为待完善", memory)
@@ -1812,6 +1827,10 @@ class SeamTests(unittest.TestCase):
             self.assertEqual(item["status"], "valid")
             self.assertEqual(item["validation"]["score"], 85)
             self.assertTrue((Path(item["record_dir"]) / "accepted-assessment.json").is_file())
+            self.assertTrue((Path(item["record_dir"]) / "evidence-bundle.json").is_file())
+            self.assertTrue((Path(item["record_dir"]) / "orchestration.json").is_file())
+            self.assertEqual(item["research"]["orchestration_version"], "v1")
+            self.assertEqual(item["research"]["role_call_counts"], {"lead": 1, "recall": 0, "arbiter": 0})
             self.assertFalse((Path(directory) / ("defer" + "red-companies.json")).exists())
 
     def test_simple_format_errors_are_repaired_without_another_hermes_call(self) -> None:
@@ -1854,18 +1873,29 @@ class SeamTests(unittest.TestCase):
         invocations = [
             {"assessment": zero_assessment(), "errors": [], "raw": "zero", "usage": None, "attempt": {"kind": "research", "has_json": True}, "seconds": 0.1},
             {"assessment": assessment(), "errors": [], "raw": "corrected", "usage": None, "attempt": {"kind": "zero_score_review", "has_json": True}, "seconds": 0.1},
+            {
+                "assessment": {"decision": "recall", "reason": "S1 支持遗漏的直接路径。", "evidence_ids": ["S1"]},
+                "errors": [],
+                "raw": "arbiter",
+                "usage": None,
+                "attempt": {"kind": "arbiter", "has_json": True},
+                "seconds": 0.1,
+            },
         ]
         with tempfile.TemporaryDirectory() as directory, patch("company_research_trial.company_research_trial._invoke_hermes", side_effect=invocations) as mocked:
             item = research_one(record(), 1, Path(directory), hermes=Path("/bin/true"), evidence_pack=EVIDENCE)
-        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(mocked.call_count, 3)
         self.assertEqual(item["status"], "valid")
         self.assertEqual(item["validation"]["score"], 85)
-        self.assertEqual(item["research"]["attempt_count"], 2)
+        self.assertEqual(item["research"]["attempt_count"], 3)
+        self.assertEqual(item["research"]["selected_role"], "recall")
         self.assertEqual(item["research"]["zero_score_review"]["initial_score"], 0)
         self.assertTrue(item["research"]["zero_score_review"]["accepted"])
         self.assertTrue(item["research"]["zero_score_review"]["changed_score"])
-        self.assertIn("仅针对首次合法结果为 0%", mocked.call_args_list[1].kwargs["prompt"])
-        self.assertEqual(mocked.call_args_list[1].kwargs["raw_path"].name, "hermes-raw-zero-review.txt")
+        self.assertIn("CRITIC_SCOPE", mocked.call_args_list[1].kwargs["prompt"])
+        self.assertIn("上次已通过校验的 JSON", mocked.call_args_list[1].kwargs["prompt"])
+        self.assertEqual(mocked.call_args_list[1].kwargs["raw_path"].name, "hermes-raw-recall-attempt-1.txt")
+        self.assertEqual(item["research"]["arbitration"]["decision"], "recall")
 
     def test_valid_zero_review_can_keep_zero_without_repeating(self) -> None:
         invocation = {"assessment": zero_assessment(), "errors": [], "raw": "zero", "usage": None, "attempt": {"kind": "research", "has_json": True}, "seconds": 0.1}
@@ -1874,13 +1904,15 @@ class SeamTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, 2)
         self.assertEqual(item["status"], "valid")
         self.assertEqual(item["validation"]["score"], 0)
-        self.assertTrue(item["research"]["zero_score_review"]["accepted"])
+        self.assertFalse(item["research"]["zero_score_review"]["accepted"])
         self.assertFalse(item["research"]["zero_score_review"]["changed_score"])
+        self.assertEqual(item["research"]["selected_role"], "lead")
 
     def test_relevant_supply_partner_below_middle_band_gets_semantic_review(self) -> None:
         low = assessment()
         low["role_judgment"]["operational_role"] = "分销商"
         low["role_judgment"]["commercial_relationship"] = "供应合作伙伴"
+        low["match"]["follow_up"] = "淘汰"
         low["match"]["components"] = {
             "production_process_need": 6,
             "catalog_fit": 24,
@@ -1891,24 +1923,34 @@ class SeamTests(unittest.TestCase):
         invocations = [
             {"assessment": low, "errors": [], "raw": "low", "usage": None, "attempt": {"kind": "research", "has_json": True}, "seconds": 0.1},
             {"assessment": assessment(), "errors": [], "raw": "reviewed", "usage": None, "attempt": {"kind": "low_score_review", "has_json": True}, "seconds": 0.1},
+            {
+                "assessment": {"decision": "recall", "reason": "S1 支持遗漏的供应路径。", "evidence_ids": ["S1"]},
+                "errors": [],
+                "raw": "arbiter",
+                "usage": None,
+                "attempt": {"kind": "arbiter", "has_json": True},
+                "seconds": 0.1,
+            },
         ]
         with tempfile.TemporaryDirectory() as directory, patch(
             "company_research_trial.company_research_trial._invoke_hermes", side_effect=invocations
         ) as mocked:
             item = research_one(record(), 1, Path(directory), hermes=Path("/bin/true"), evidence_pack=EVIDENCE)
-        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(mocked.call_count, 3)
         self.assertEqual(item["validation"]["score"], 85)
         review = item["research"]["zero_score_review"]
         self.assertEqual(review["kind"], "low_consistency")
         self.assertEqual(review["initial_score"], 50)
         self.assertEqual(review["review_score"], 85)
-        self.assertIn("假阴性审计", mocked.call_args_list[1].kwargs["prompt"])
+        self.assertIn("与 Lead 分离的召回审查角色", mocked.call_args_list[1].kwargs["prompt"])
         self.assertEqual(mocked.call_args_list[1].kwargs["reasoning"], "high")
+        self.assertEqual(mocked.call_count, 3)
 
     def test_low_score_review_is_a_recall_audit_and_cannot_reduce_a_valid_score(self) -> None:
         low = assessment()
         low["role_judgment"]["operational_role"] = "分销商"
         low["role_judgment"]["commercial_relationship"] = "供应合作伙伴"
+        low["match"]["follow_up"] = "淘汰"
         low["match"]["components"] = {
             "production_process_need": 6,
             "catalog_fit": 24,
@@ -1921,6 +1963,9 @@ class SeamTests(unittest.TestCase):
         prompt = low_score_review_prompt("BASE", low, 50)
         self.assertIn("不得降低", prompt)
         self.assertIn("保持上次", prompt)
+        critic_prompt = recall_candidate_prompt("BASE", low, 50)
+        self.assertIn("CRITIC_SCOPE", critic_prompt)
+        self.assertIn("上次已通过校验的 JSON", critic_prompt)
         invocations = [
             {"assessment": low, "errors": [], "raw": "low", "usage": None, "attempt": {"kind": "research", "has_json": True}, "seconds": 0.1},
             {"assessment": lowered, "errors": [], "raw": "lowered", "usage": None, "attempt": {"kind": "low_score_review", "has_json": True}, "seconds": 0.1},
@@ -1940,7 +1985,11 @@ class SeamTests(unittest.TestCase):
         terminal["role_judgment"]["operational_role"] = "终端用户"
         terminal["role_judgment"]["commercial_relationship"] = "潜在客户"
         terminal["match"]["relevant_process_or_business_confirmed"] = False
+        terminal["match"]["follow_up"] = "淘汰"
         self.assertTrue(_needs_low_score_review(terminal, 50))
+
+        terminal["match"]["follow_up"] = "跟进"
+        self.assertFalse(_needs_low_score_review(terminal, 50))
 
     def test_invalid_zero_review_keeps_the_first_valid_zero(self) -> None:
         invocations = [

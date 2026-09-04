@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-PROJECT_TAG="repro-2026-08-31"
+PROJECT_TAG="agent-orchestration-v1-2026-09-04"
 ANYSEARCH_COMMIT="4d6cef918e9338c9deef43b81ac0f7e22606825f"
 ANYSEARCH_SHA256="e4944fef758fae860d26b15460f5940f198841c2f965775ec9a2b36092e0edf9"
 PROFILE_SHA256="25794c0c7d82bc31e5b218605120b304d523aa35c4d7c1c2fdce141d23bc3d09"
@@ -80,9 +80,12 @@ pass "Python requirements"
 "$PYTHON_BIN" -m unittest \
   company_research_trial.test_company_research_trial \
   company_research_trial.test_dashboard \
-  company_research_trial.test_research_api
+  company_research_trial.test_research_api \
+  company_research_trial.test_orchestration
 "$PYTHON_BIN" -m py_compile \
   company_research_trial/company_research_trial.py \
+  company_research_trial/agent_contracts.py \
+  company_research_trial/orchestration.py \
   company_research_trial/dashboard.py \
   company_research_trial/research_api.py
 pass "validator、单元测试和 Python 编译"

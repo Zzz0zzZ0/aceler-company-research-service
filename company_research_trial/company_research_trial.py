@@ -34,6 +34,9 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from company_research_trial.agent_contracts import AgentCandidate, ArbitrationDecision, EvidenceBundle
+from company_research_trial.orchestration import orchestrate_assessment
+
 
 TRIAL_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = TRIAL_DIR.parent
@@ -2558,17 +2561,100 @@ def low_score_review_prompt(
     )
 
 
+def recall_candidate_prompt(
+    base_prompt: str,
+    prior_assessment: dict[str, Any],
+    initial_score: int,
+) -> str:
+    """Give a separate critic one bounded target instead of inviting a second free-form analysis."""
+    review = (
+        zero_score_review_prompt(base_prompt, prior_assessment)
+        if initial_score == 0
+        else low_score_review_prompt(base_prompt, prior_assessment, initial_score)
+    )
+    return review + (
+        "\n\nCRITIC_SCOPE：你是与 Lead 分离的召回审查角色，但只审查上次结果是否漏掉证据路径。"
+        "不得因为重新措辞、行业常见用途或未公开私有配方而引入新的精确目录产品；每个新增产品必须满足 PRODUCT_CONTRACT 的产品级最低语义门槛。"
+        "没有明确遗漏时逐字保持上次评分、跟进结论和采购方向。只返回完整 JSON。"
+    )
+
+
+def _arbitration_product_rules(*assessments: dict[str, Any]) -> str:
+    """Return exact catalog rows for disputed products, plus the shared process cautions."""
+    products = {
+        str(direction.get("product") or "")
+        for assessment in assessments
+        for direction in assessment.get("procurement_directions") or []
+        if isinstance(direction, dict) and direction.get("product")
+    }
+    text = PRODUCT_CONTRACT.read_text(encoding="utf-8")
+    matrix = text.split("## Product qualification matrix", 1)[1].split("## Process mapping rules", 1)[0]
+    rows = []
+    for line in matrix.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 3 and cells[0] in products:
+            rows.append(line)
+    process_rules = text.split("## Process mapping rules", 1)[1]
+    return "\n".join([*rows, "", "## Process mapping and disqualifiers", process_rules.strip()]).strip()
+
+
+def arbitration_prompt(
+    evidence_pack: str,
+    lead_assessment: dict[str, Any],
+    recall_assessment: dict[str, Any],
+) -> str:
+    """Build a bounded selector prompt; the arbiter never searches or rewrites an assessment."""
+    score_rubric = REPORT_CONTRACT.read_text(encoding="utf-8").split("## Score rubric", 1)[1].split(
+        "## Structured assessment schema", 1
+    )[0]
+    product_rules = _arbitration_product_rules(lead_assessment, recall_assessment)
+    return (
+        "你是公司匹配评估的最终争议仲裁员。两份候选均已通过结构和引用边界校验。"
+        "只判断 Recall 候选新增或提高的路径是否确由公司级证据和产品目录支持；不得搜索、补写或合并评估。"
+        "Recall 并不天然比 Lead 更完整，提高分数也不是目标。"
+        "若新增路径只是行业邻接、客户行业、设备/EPC、成品安装，或把未知采购/配方当成已确认事实，选择 lead。"
+        "若 lead 因采购单、供应商、私有配方或规格未公开而遗漏已确认的直接产品、强工艺、持续消耗、材料供应/分销或规格控制路径，选择 recall。"
+        "逐个检查 Recall 相对 Lead 新增或替换的精确产品：必须满足下方该产品目录行及工艺规则的最低前提。"
+        "'该行业通常使用'、'可能用于配方'、'私有配方未公开'只能表达待核实机会，不能建立精确目录匹配；任一关键新增产品不满足前提时选择 lead。"
+        "返回且只返回：{\"decision\":\"lead 或 recall\",\"reason\":\"简洁中文\",\"evidence_ids\":[\"S1\"]}。"
+        "选择 recall 时 evidence_ids 至少一个且必须来自证据包。\n\n"
+        "---评分规则---\n"
+        + score_rubric.strip()
+        + "\n---本次争议产品的精确语义规则---\n"
+        + product_rules
+        + "\n---证据包---\n"
+        + evidence_pack.strip()
+        + "\n---Lead 候选---\n"
+        + json.dumps(lead_assessment, ensure_ascii=False)
+        + "\n---Recall 候选---\n"
+        + json.dumps(recall_assessment, ensure_ascii=False)
+        + "\nFINAL_PRECISION_CHECK：未知采购/供应商/私有规格不能否定已由公司级化学或工艺证据建立的路径，但也绝不能用来新建精确产品。逐个核对 Recall 新增产品后，只选择证据支持更准确的一份；只返回指定 JSON。"
+    )
+
+
 def _needs_low_score_review(assessment: dict[str, Any], score: int) -> bool:
-    if not 0 < score < 55:
+    if not 0 <= score < 55:
         return False
-    if assessment.get("match", {}).get("relevant_process_or_business_confirmed") is True:
+    match = assessment.get("match") or {}
+    if match.get("follow_up") != "淘汰":
+        return False
+    if match.get("relevant_process_or_business_confirmed") is True:
         return True
     if assessment.get("procurement_directions"):
         return True
+    if match.get("sourcing_or_channel_signal_confirmed") is True:
+        return True
+    if isinstance(match.get("product_match"), int) and isinstance(match.get("commercial_match"), int):
+        if match["product_match"] >= 5 and match["commercial_match"] >= 4:
+            return True
     role = assessment.get("role_judgment") or {}
-    return role.get("operational_role") in {"耐材生产商", "材料生产商", "终端用户", "分销商", "贸易商", "工程公司"} or role.get(
-        "commercial_relationship"
-    ) in {"潜在客户", "渠道合作伙伴", "供应合作伙伴", "产品组合合作伙伴"}
+    return match.get("official_core_evidence") is True and role.get("operational_role") in {
+        "耐材生产商",
+        "材料生产商",
+        "终端用户",
+        "分销商",
+        "贸易商",
+    }
 
 
 def _redact_sensitive(text: str) -> str:
@@ -3044,6 +3130,175 @@ def _record_dir(record: dict[str, Any], index: int, run_dir: Path) -> Path:
     return run_dir / "records" / f"{index:03d}-{_slug(str(record.get('id') or record.get('name') or 'company'))}"
 
 
+def _run_validated_candidate(
+    *,
+    role: str,
+    prompt: str,
+    record_dir: Path,
+    hermes: Path,
+    timeout: int,
+    reasoning: str,
+    toolsets: str,
+    evidence_pack: str,
+    max_attempts: int,
+) -> AgentCandidate:
+    """Run one semantic role with bounded format retries and deterministic validation."""
+    attempts: list[dict[str, Any]] = []
+    retry_errors: list[str] = []
+    invocation: dict[str, Any] = {}
+    assessment: dict[str, Any] | None = None
+    validation: dict[str, Any] = {}
+    for attempt_number in range(1, max_attempts + 1):
+        attempt_prompt = prompt
+        if retry_errors:
+            detail = "\n".join(f"- {error}" for error in retry_errors)[:2000]
+            attempt_prompt += (
+                "\n\n上次输出未通过校验。只修正 JSON 结构、合法枚举和证据引用，不改变已由证据支持的事实；仍只返回一个 JSON 对象。\n"
+                + detail
+            )
+        prefix = "" if role == "lead" else f"-{role}"
+        invocation = _invoke_hermes(
+            record_dir=record_dir,
+            hermes=hermes,
+            timeout=timeout,
+            reasoning=reasoning,
+            prompt=attempt_prompt,
+            toolsets=toolsets,
+            usage_path=record_dir / f"hermes-usage{prefix}-attempt-{attempt_number}.json",
+            raw_path=record_dir / f"hermes-raw{prefix}-attempt-{attempt_number}.txt",
+            attempt_kind=f"{role}_attempt_{attempt_number}",
+        )
+        attempt_errors = [str(error) for error in invocation.get("errors") or []]
+        assessment = invocation.get("assessment")
+        repair_log: list[str] = []
+        if isinstance(assessment, dict):
+            assessment, repair_log = _repair_assessment(assessment, evidence_pack)
+            validation = _validate_object(assessment, record_dir)
+            provenance_errors = anysearch_source_errors(assessment, evidence_pack)
+            if provenance_errors:
+                validation["valid"] = False
+                validation["errors"] = list(validation.get("errors") or []) + provenance_errors
+            if not validation.get("valid"):
+                attempt_errors.extend(str(error) for error in validation.get("errors") or [])
+        else:
+            validation = {
+                "valid": False,
+                "score": 0,
+                "level": "低",
+                "errors": [f"Hermes {role} output contains no valid assessment JSON"],
+                "warnings": [],
+            }
+            attempt_errors.extend(validation["errors"])
+        attempt_errors = list(dict.fromkeys(attempt_errors))
+        attempts.append(
+            {
+                **(invocation.get("attempt") or {}),
+                "role": role,
+                "number": attempt_number,
+                "errors": attempt_errors,
+                "repairs": repair_log,
+                "validation": {
+                    key: validation.get(key)
+                    for key in (
+                        "valid",
+                        "score",
+                        "level",
+                        "product_match",
+                        "commercial_match",
+                        "follow_up",
+                        "errors",
+                        "warnings",
+                    )
+                },
+                "usage": invocation.get("usage"),
+            }
+        )
+        retry_errors = attempt_errors
+        if isinstance(assessment, dict) and validation.get("valid") and not attempt_errors:
+            break
+    valid = isinstance(assessment, dict) and validation.get("valid") and not retry_errors
+    return AgentCandidate(
+        role=role,
+        assessment=assessment if isinstance(assessment, dict) else None,
+        validation=validation,
+        invocation=invocation,
+        attempts=tuple(attempts),
+        errors=() if valid else tuple(retry_errors),
+    )
+
+
+def _run_arbitration(
+    *,
+    lead: AgentCandidate,
+    recall: AgentCandidate,
+    record_dir: Path,
+    hermes: Path,
+    timeout: int,
+    toolsets: str,
+    evidence_pack: str,
+) -> ArbitrationDecision:
+    """Select one validated candidate; invalid arbitration always falls back to lead."""
+    invocation = _invoke_hermes(
+        record_dir=record_dir,
+        hermes=hermes,
+        timeout=timeout,
+        reasoning="high",
+        prompt=arbitration_prompt(evidence_pack, lead.assessment or {}, recall.assessment or {}),
+        toolsets=toolsets,
+        usage_path=record_dir / "hermes-usage-arbiter.json",
+        raw_path=record_dir / "hermes-raw-arbiter.txt",
+        attempt_kind="arbiter",
+    )
+    errors = [str(error) for error in invocation.get("errors") or []]
+    payload = invocation.get("assessment")
+    decision: str | None = None
+    reason = ""
+    evidence_ids: tuple[str, ...] = ()
+    if not isinstance(payload, dict):
+        errors.append("Arbiter returned no JSON object")
+    else:
+        decision = payload.get("decision") if payload.get("decision") in {"lead", "recall"} else None
+        reason = str(payload.get("reason") or "").strip()
+        raw_ids = payload.get("evidence_ids")
+        if isinstance(raw_ids, list):
+            evidence_ids = tuple(dict.fromkeys(str(value) for value in raw_ids if isinstance(value, str)))
+        if decision is None:
+            errors.append("Arbiter decision must be lead or recall")
+        if not reason:
+            errors.append("Arbiter reason is required")
+        available_ids = set(_pack_sources(evidence_pack))
+        unknown_ids = [value for value in evidence_ids if value not in available_ids]
+        if unknown_ids:
+            errors.append("Arbiter cited evidence IDs outside the evidence pack")
+        if decision == "recall" and not evidence_ids:
+            errors.append("Arbiter must cite evidence when selecting recall")
+    errors = list(dict.fromkeys(errors))
+    result = ArbitrationDecision(
+        decision=decision,
+        reason=reason,
+        evidence_ids=evidence_ids,
+        invocation=invocation,
+        errors=tuple(errors),
+    )
+    (record_dir / "arbitration.json").write_text(
+        json.dumps(
+            {
+                "decision": result.decision,
+                "reason": result.reason,
+                "evidence_ids": list(result.evidence_ids),
+                "errors": list(result.errors),
+                "usage": invocation.get("usage"),
+                "seconds": invocation.get("seconds"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return result
+
+
 def research_one(
     record: dict[str, Any],
     index: int,
@@ -3111,180 +3366,85 @@ def research_one(
         }
         (record_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return result
-    base_prompt = research_prompt(record, evidence_pack)
-    attempts: list[dict[str, Any]] = []
-    retry_errors: list[str] = []
-    invocation: dict[str, Any] = {}
-    assessment: dict[str, Any] | None = None
-    validation: dict[str, Any] = {}
-    status = "failed"
-    zero_score_review: dict[str, Any] = {
-        "enabled": review_zero_score,
-        "triggered": False,
-        "accepted": False,
-        "changed_score": False,
-        "initial_score": None,
-        "review_score": None,
-        "errors": [],
-        "kind": None,
-    }
-    for attempt_number in range(1, max_attempts + 1):
-        prompt = base_prompt
-        if retry_errors:
-            detail = "\n".join(f"- {error}" for error in retry_errors)[:2000]
-            prompt += (
-                "\n\n上次输出未通过校验。只修正 JSON 结构、合法枚举和证据引用，不改变已由证据支持的事实；仍只返回一个 JSON 对象。\n"
-                + detail
-            )
-        invocation = _invoke_hermes(
+    evidence_bundle = EvidenceBundle(
+        company=str(record.get("name") or ""),
+        text=evidence_pack,
+        sources=tuple(_pack_sources(evidence_pack).values()),
+        retrieval=copy.deepcopy(search_meta),
+        sha256=hashlib.sha256(evidence_pack.encode("utf-8")).hexdigest(),
+    )
+    (record_dir / "evidence-bundle.json").write_text(
+        json.dumps(evidence_bundle.manifest(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    base_prompt = research_prompt(record, evidence_bundle.text)
+    orchestration = orchestrate_assessment(
+        run_lead=lambda: _run_validated_candidate(
+            role="lead",
+            prompt=base_prompt,
             record_dir=record_dir,
             hermes=hermes,
             timeout=timeout,
             reasoning=reasoning,
-            prompt=prompt,
             toolsets=toolsets,
-            usage_path=record_dir / f"hermes-usage-attempt-{attempt_number}.json",
-            raw_path=record_dir / f"hermes-raw-attempt-{attempt_number}.txt",
-            attempt_kind=f"research_attempt_{attempt_number}",
-        )
-        attempt_errors = [str(error) for error in invocation.get("errors") or []]
-        assessment = invocation.get("assessment")
-        repair_log: list[str] = []
-        if isinstance(assessment, dict):
-            assessment, repair_log = _repair_assessment(assessment, evidence_pack)
-            validation = _validate_object(assessment, record_dir)
-            provenance_errors = anysearch_source_errors(assessment, evidence_pack)
-            if provenance_errors:
-                validation["valid"] = False
-                validation["errors"] = list(validation.get("errors") or []) + provenance_errors
-            if not validation.get("valid"):
-                attempt_errors.extend(str(error) for error in validation.get("errors") or [])
-        else:
-            validation = {
-                "valid": False,
-                "score": 0,
-                "level": "低",
-                "errors": ["Hermes output contains no valid assessment JSON"],
-                "warnings": [],
-            }
-            attempt_errors.extend(validation["errors"])
-        attempt_errors = list(dict.fromkeys(attempt_errors))
-        attempts.append(
-            {
-                **(invocation.get("attempt") or {}),
-                "number": attempt_number,
-                "errors": attempt_errors,
-                "repairs": repair_log,
-                "validation": {
-                    key: validation.get(key)
-                    for key in (
-                        "valid",
-                        "score",
-                        "level",
-                        "product_match",
-                        "commercial_match",
-                        "follow_up",
-                        "errors",
-                        "warnings",
-                    )
-                },
-                "usage": invocation.get("usage"),
-            }
-        )
-        status = "valid" if isinstance(assessment, dict) and validation.get("valid") and not attempt_errors else "failed"
-        retry_errors = attempt_errors
-        if status == "valid":
-            break
-    initial_score = validation.get("score")
-    low_score_review = isinstance(assessment, dict) and isinstance(initial_score, int) and _needs_low_score_review(
-        assessment, initial_score
-    )
-    if status == "valid" and review_zero_score and (initial_score == 0 or low_score_review):
-        zero_score_review["triggered"] = True
-        zero_score_review["initial_score"] = initial_score
-        zero_score_review["kind"] = "zero" if initial_score == 0 else "low_consistency"
-        review_prompt = (
-            zero_score_review_prompt(base_prompt, assessment)
-            if initial_score == 0
-            else low_score_review_prompt(base_prompt, assessment, initial_score)
-        )
-        review_suffix = "zero" if initial_score == 0 else "low"
-        review_invocation = _invoke_hermes(
+            evidence_pack=evidence_bundle.text,
+            max_attempts=max_attempts,
+        ),
+        should_run_recall=_needs_low_score_review,
+        run_recall=lambda _kind, lead: _run_validated_candidate(
+            role="recall",
+            prompt=recall_candidate_prompt(base_prompt, lead.assessment or {}, lead.score or 0),
             record_dir=record_dir,
             hermes=hermes,
             timeout=timeout,
-            reasoning="high" if low_score_review else reasoning,
-            prompt=review_prompt,
+            reasoning="high",
             toolsets=toolsets,
-            usage_path=record_dir / f"hermes-usage-{review_suffix}-review.json",
-            raw_path=record_dir / f"hermes-raw-{review_suffix}-review.txt",
-            attempt_kind=f"{review_suffix}_score_review",
-        )
-        review_errors = [str(error) for error in review_invocation.get("errors") or []]
-        review_assessment = review_invocation.get("assessment")
-        review_repairs: list[str] = []
-        if isinstance(review_assessment, dict):
-            review_assessment, review_repairs = _repair_assessment(review_assessment, evidence_pack)
-            review_validation = _validate_object(review_assessment, record_dir)
-            provenance_errors = anysearch_source_errors(review_assessment, evidence_pack)
-            if provenance_errors:
-                review_validation["valid"] = False
-                review_validation["errors"] = list(review_validation.get("errors") or []) + provenance_errors
-            if not review_validation.get("valid"):
-                review_errors.extend(str(error) for error in review_validation.get("errors") or [])
-        else:
-            review_validation = {
-                "valid": False,
-                "score": 0,
-                "level": "低",
-                "errors": ["Hermes zero-score review contains no valid assessment JSON"],
-                "warnings": [],
-            }
-            review_errors.extend(review_validation["errors"])
-        if (
-            low_score_review
-            and review_validation.get("valid")
-            and isinstance(review_validation.get("score"), int)
-            and review_validation["score"] < initial_score
-        ):
-            review_errors.append("Low-score recall review cannot lower the first valid score")
-        review_errors = list(dict.fromkeys(review_errors))
-        review_accepted = isinstance(review_assessment, dict) and review_validation.get("valid") and not review_errors
-        attempts.append(
+            evidence_pack=evidence_bundle.text,
+            max_attempts=1,
+        ),
+        run_arbiter=lambda lead, recall: _run_arbitration(
+            lead=lead,
+            recall=recall,
+            record_dir=record_dir,
+            hermes=hermes,
+            timeout=timeout,
+            toolsets=toolsets,
+            evidence_pack=evidence_bundle.text,
+        ),
+        review_enabled=review_zero_score,
+    )
+    selected = orchestration.selected
+    attempts = [{**attempt, "number": number} for number, attempt in enumerate(orchestration.attempts, 1)]
+    invocation = selected.invocation
+    assessment = selected.assessment
+    validation = selected.validation
+    status = "valid" if selected.valid else "failed"
+    zero_score_review = orchestration.review
+    errors = [] if status == "valid" else list(selected.errors)
+    orchestration_manifest = {
+        "version": "v1",
+        "evidence_sha256": evidence_bundle.sha256,
+        "selected_role": selected.role,
+        "lead_score": zero_score_review.get("initial_score"),
+        "recall_score": zero_score_review.get("review_score"),
+        "agent_call_count": len(attempts),
+        "role_call_counts": {
+            role: sum(attempt.get("role") == role or attempt.get("kind") == role for attempt in attempts)
+            for role in ("lead", "recall", "arbiter")
+        },
+        "arbitration": (
             {
-                **(review_invocation.get("attempt") or {}),
-                "number": len(attempts) + 1,
-                "errors": review_errors,
-                "repairs": review_repairs,
-                "validation": {
-                    key: review_validation.get(key)
-                    for key in (
-                        "valid",
-                        "score",
-                        "level",
-                        "product_match",
-                        "commercial_match",
-                        "follow_up",
-                        "errors",
-                        "warnings",
-                    )
-                },
-                "usage": review_invocation.get("usage"),
+                "decision": orchestration.arbitration.decision,
+                "reason": orchestration.arbitration.reason,
+                "evidence_ids": list(orchestration.arbitration.evidence_ids),
+                "errors": list(orchestration.arbitration.errors),
             }
-        )
-        zero_score_review.update(
-            {
-                "accepted": bool(review_accepted),
-                "changed_score": bool(review_accepted and review_validation.get("score") != initial_score),
-                "review_score": review_validation.get("score") if review_validation.get("valid") else None,
-                "errors": review_errors,
-            }
-        )
-        if review_accepted:
-            invocation = review_invocation
-            assessment = review_assessment
-            validation = review_validation
-    errors = [] if status == "valid" else retry_errors
+            if orchestration.arbitration
+            else None
+        ),
+    }
+    (record_dir / "orchestration.json").write_text(
+        json.dumps(orchestration_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     (record_dir / "hermes-raw.txt").write_text(str(invocation.get("raw") or ""), encoding="utf-8")
     if isinstance(invocation.get("usage"), dict):
         (record_dir / "hermes-usage.json").write_text(
@@ -3304,10 +3464,24 @@ def research_one(
         "anysearch": search_meta,
         "research": {
             **(invocation.get("attempt") or {}),
+            "orchestration_version": "v1",
+            "selected_role": selected.role,
+            "agent_call_count": len(attempts),
+            "role_call_counts": orchestration_manifest["role_call_counts"],
             "attempt_count": len(attempts),
             "max_attempts": max_attempts,
             "attempts": attempts,
             "zero_score_review": zero_score_review,
+            "arbitration": (
+                {
+                    "decision": orchestration.arbitration.decision,
+                    "reason": orchestration.arbitration.reason,
+                    "evidence_ids": list(orchestration.arbitration.evidence_ids),
+                    "errors": list(orchestration.arbitration.errors),
+                }
+                if orchestration.arbitration
+                else None
+            ),
         },
         "record_dir": str(record_dir),
     }
@@ -3533,7 +3707,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--no-zero-review", action="store_true", help="Disable the one-time review of valid 0%% results")
+    parser.add_argument(
+        "--no-zero-review",
+        action="store_true",
+        help="Disable conditional Recall review and arbitration (compatibility flag)",
+    )
     parser.add_argument(
         "--refresh-evidence-cache",
         action="store_true",

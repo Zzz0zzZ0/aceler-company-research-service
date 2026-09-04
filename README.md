@@ -1,6 +1,6 @@
 # Aceler Company Research Trial
 
-本项目的核心链路接收来源中立的公司身份线索，使用 AnySearch 提供 1–2 个可信页面，再让 Hermes 按 `aceler-company-research` 仓库契约输出一份结构化背调。公司名是唯一必填项；官网和 LinkedIn 可选，行业、评级、背景或联系人等 CRM 字段既不必提供，也不会因缺失而降低评分。Twenty CRM 只是一个可选的只读抽样入口。每份 Hermes JSON 原样交给仓库 validator；最终状态只有 `valid` 或 `failed`。
+本项目的核心链路接收来源中立的公司身份线索，使用 AnySearch 提供最多 3 个可信页面，再由标准库 Orchestrator 编排 Hermes Lead、条件式 Recall Critic 和按需 Arbiter，按 `aceler-company-research` 仓库契约输出一份结构化背调。公司名是唯一必填项；官网和 LinkedIn 可选，行业、评级、背景或联系人等 CRM 字段既不必提供，也不会因缺失而降低评分。Twenty CRM 只是一个可选的只读抽样入口。每份候选 JSON 均交给仓库 validator；最终状态只有 `valid` 或 `failed`。
 
 新机器或同事的 Codex 请不要只照本页的简版命令安装。完整的固定版本、Hermes profile、业务记忆、AnySearch、Codex Skill 自动发现和验收步骤见 [`INSTALL-CODEX.md`](INSTALL-CODEX.md)。
 
@@ -15,7 +15,7 @@ cp config/local.env.example config/local.env
 
 ### Hermes 精确运行配置
 
-仓库直接提供当前生产使用的完整通用业务记忆和 Hermes profile 配置：[`config/hermes/aceler-memory/`](config/hermes/aceler-memory/)。它包含完整产品主档、工艺映射、客户画像、评分和证据边界，没有删减业务规则。当前基准运行环境为 Hermes Agent `0.20.4`、MiniMax-M2.7、`minimax-cn` provider；不同模型或版本不属于精确复现。
+仓库直接提供当前生产使用的完整通用业务记忆和 Hermes profile 配置：[`config/hermes/aceler-memory/`](config/hermes/aceler-memory/)。它包含完整产品主档、工艺映射、客户画像、评分和证据边界，没有删减业务规则。当前基准运行环境为 Hermes Agent `0.20.4`、MiniMax-M3、`minimax-cn` provider；不同模型或版本不属于精确复现。
 
 ```bash
 hermes profile create aceler-memory --no-skills \
@@ -58,7 +58,7 @@ result = research_company(
 )
 ```
 
-返回对象固定包含 `trace_id`、`status`、`assessment`、`validation`、`report_markdown`、`usage` 和 `errors`。`status` 只有 `valid` / `failed`；检索、Hermes 重试、零分复核、validator 和审计文件仍完全复用当前生产实现。
+返回对象固定包含 `trace_id`、`status`、`assessment`、`validation`、`report_markdown`、`usage` 和 `errors`。`status` 只有 `valid` / `failed`；检索、Lead 重试、条件 Recall、按需仲裁、validator 和审计文件均复用同一生产实现。
 
 非 Python 调用方使用 JSON stdin/stdout 适配器：
 
@@ -69,11 +69,11 @@ printf '%s\n' '{"name":"Hatria","website":"https://hatria.com"}' \
 
 stdout 始终只有一个 JSON 对象。退出码 `0` 表示 `valid`，`1` 表示背调完成但结果为 `failed`，`2` 表示输入或运行配置错误。请求只接受 `name`、`website`、`linkedin_url`；调用仍会在 `outputs/company-research-trial/<UTC时间>-api-n001/` 保留完整审计产物。
 
-每家公司流程固定为：来源中立的 identity seed（可只有公司名）→ AnySearch 批量检索主体/产品与工厂/工艺并提取最多 2 页 → Hermes research → JSON parse → 仓库 validator。输入字段只是待核验线索；公司角色、工艺和产品映射以本次证据包为准。AnySearch 证据包只采集一次；Hermes 或校验失败时默认最多尝试 3 次，可用 `--max-attempts 1` 关闭重试。重试只修正 JSON、枚举和证据引用，不自动放行；每轮保留独立的 `hermes-raw-attempt-N.txt`、usage 和错误审计。
+每家公司流程固定为：来源中立的 identity seed（可只有公司名）→ AnySearch 批量检索主体/产品与工厂/工艺并提取最多 3 页 → 不可变 `EvidenceBundle` → Lead → 条件 Recall Critic → 按需 Arbiter → 仓库 validator。输入字段只是待核验线索；公司角色、工艺和产品映射以本次证据包为准。AnySearch 证据包只采集一次，Recall 和 Arbiter 禁止搜索。Lead 或校验失败时默认最多尝试 3 次，可用 `--max-attempts 1` 关闭重试。重试只修正 JSON、枚举和证据引用，不自动放行；每轮保留独立的 raw、usage、`evidence-bundle.json` 和 `orchestration.json` 审计文件。
 
 主 Hermes 调用必须直接用中文填写所有展示性自由文本，并保留公司/人名、产品专名、牌号、工艺缩写、数字和单位。Validator 完成后，系统剔除这些允许保留的英文专名；只有仍检测到英文说明时才执行一次失败开放的中文本地化。原始 canonical assessment、分数、枚举、证据 ID、URL 和产品字段保持不变；翻译结果单独写入 `display_assessment` 与 `localized-assessment.json`，仅供报告和看板使用。翻译超时、输出结构变化或受保护术语被改动时直接显示原文，不改变背调状态或主调用结果。
 
-首次合法结果恰好为 0% 时，系统默认使用同一证据包和首次 JSON 做一次独立复核，专门排查生产投入、高温耗材和技术渠道是否被遗漏。复核可以维持 0%，不会触发新搜索，也不会重复复核；复核输出无效时保留首次合法结果。临时关闭时在运行命令中加入 `--no-zero-review`。
+首次合法结果为 0%，或低于 55% 且已经确认相关工艺、材料角色、采购方向或渠道角色时，系统使用同一证据包调用独立 Recall Critic，专门排查生产投入、高温耗材和技术渠道是否被遗漏。Critic 改变分数、跟进结论或产品路线时必须再经 Arbiter；仲裁无效或拒绝时保留 Lead，且整个过程不会触发新搜索。兼容性关闭开关仍为 `--no-zero-review`。
 
 Hermes prompt 使用 `$aceler-company-research` 与唯一 JSON skeleton。Hermes 基于完整证据做五维语义评分：`production_process_need`（0–30）、`catalog_fit`（0–30）、`consumption_intensity`（0–20）、`demand_recurrence`（0–10）、`company_role_fit`（0–10），validator 只验范围并求和后向下取 5。评分覆盖直接消耗、分销、工程/规格影响、互补供应和产品组合合作；已确认的公司产品/工艺可支持合理工业推断，未公开采购或私有配方只降低置信度，不把已成立的路径清零。行业标签或遥远邻接关系本身仍不加分。
 
@@ -95,7 +95,8 @@ python3 skill/aceler-company-research/scripts/validate_assessment.py --self-test
 python3 -m unittest company_research_trial.test_company_research_trial
 python3 -m unittest company_research_trial.test_dashboard
 python3 -m unittest company_research_trial.test_research_api
-python3 -m py_compile company_research_trial/company_research_trial.py company_research_trial/dashboard.py company_research_trial/research_api.py
+python3 -m unittest company_research_trial.test_orchestration
+python3 -m py_compile company_research_trial/company_research_trial.py company_research_trial/agent_contracts.py company_research_trial/orchestration.py company_research_trial/dashboard.py company_research_trial/research_api.py
 ```
 
 ## 本地看板：结果只读 + 单家公司背调
