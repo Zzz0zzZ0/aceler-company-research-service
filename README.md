@@ -1,6 +1,6 @@
 # Aceler Company Research Trial
 
-本项目的核心链路接收来源中立的公司身份线索，使用 AnySearch 提供最多 3 个可信页面，再由标准库 Orchestrator 编排 Hermes Lead、条件式 Recall Critic 和按需 Arbiter，按 `aceler-company-research` 仓库契约输出一份结构化背调。公司名是唯一必填项；官网和 LinkedIn 可选，行业、评级、背景或联系人等 CRM 字段既不必提供，也不会因缺失而降低评分。Twenty CRM 只是一个可选的只读抽样入口。每份候选 JSON 均交给仓库 validator；最终状态只有 `valid` 或 `failed`。
+本项目的核心链路接收来源中立的公司身份线索，使用 AnySearch 提供最多 3 个可信页面，再由标准库 Orchestrator 编排 Evidence Agent、Catalog Router、Lead、条件式 Recall Critic 和按需 Arbiter，按 `aceler-company-research` 仓库契约输出一份结构化背调。公司名是唯一必填项；官网和 LinkedIn 可选，行业、评级、背景或联系人等 CRM 字段既不必提供，也不会因缺失而降低评分。Twenty CRM 只是一个可选的只读抽样入口。每份候选 JSON 均交给仓库 validator；最终状态只有 `valid` 或 `failed`。
 
 新机器或同事的 Codex 请不要只照本页的简版命令安装。完整的固定版本、Hermes profile、业务记忆、AnySearch、Codex Skill 自动发现和验收步骤见 [`INSTALL-CODEX.md`](INSTALL-CODEX.md)。
 
@@ -73,6 +73,12 @@ stdout 始终只有一个 JSON 对象。退出码 `0` 表示 `valid`，`1` 表�
 
 输入字段只是待核验线索；公司角色、工艺和产品映射以本次证据包为准。AnySearch 证据包只采集一次，后续 Agent 禁止搜索。Lead 或校验失败时默认最多尝试 3 次，可用 `--max-attempts 1` 关闭重试。重试只修正 JSON、枚举和证据引用，不自动放行；每轮保留独立的 raw、usage、`evidence-bundle.json` 和 `orchestration.json` 审计文件。
 
+### 当前验证基线
+
+2026-09-04 在 100 家 CRM 标注集、MiniMax-M3、5 并发上的同证据语义 A/B 结果为：100/100 有效，召回率 91.07%，精确率 82.26%，TP/FP/TN/FN 为 51/11/33/5。对比旧版，召回率由 87.50% 提高 3.57 个百分点，精确率由 84.48% 下降 2.22 个百分点，准确率保持 84.00%。
+
+Lead 实际输入 token 中位数从 16,101 降至 4,974，最大值从 43,402 降至 6,572；所有语义 Agent 总输入 token 从 2,492,831 降至 917,868，减少 63.18%。Agent 调用由 139 次增至 225 次，但墙钟时间仅由 781.6 秒增至 806.1 秒，单家中位耗时由 33.2 秒降至 29.1 秒。该基线复用同一批已保存证据，因此 AnySearch 为 0 次；另外的 SARRALLE 实时冒烟已验证 Evidence Agent 能将 15,543 字符原页压缩为 15 条引文可核验事实和 4,565 字符下游上下文。
+
 主 Hermes 调用必须直接用中文填写所有展示性自由文本，并保留公司/人名、产品专名、牌号、工艺缩写、数字和单位。Validator 完成后，系统剔除这些允许保留的英文专名；只有仍检测到英文说明时才执行一次失败开放的中文本地化。原始 canonical assessment、分数、枚举、证据 ID、URL 和产品字段保持不变；翻译结果单独写入 `display_assessment` 与 `localized-assessment.json`，仅供报告和看板使用。翻译超时、输出结构变化或受保护术语被改动时直接显示原文，不改变背调状态或主调用结果。
 
 首次合法结果为 0%，或低于 55% 且已经确认相关工艺、材料角色、采购方向或渠道角色时，系统使用同一证据包调用独立 Recall Critic，专门排查生产投入、高温耗材和技术渠道是否被遗漏。Critic 改变分数、跟进结论或产品路线时必须再经 Arbiter；仲裁无效或拒绝时保留 Lead，且整个过程不会触发新搜索。兼容性关闭开关仍为 `--no-zero-review`。
@@ -98,7 +104,8 @@ python3 -m unittest company_research_trial.test_company_research_trial
 python3 -m unittest company_research_trial.test_dashboard
 python3 -m unittest company_research_trial.test_research_api
 python3 -m unittest company_research_trial.test_orchestration
-python3 -m py_compile company_research_trial/company_research_trial.py company_research_trial/agent_contracts.py company_research_trial/orchestration.py company_research_trial/dashboard.py company_research_trial/research_api.py
+python3 -m unittest company_research_trial.test_structured_evidence
+python3 -m py_compile company_research_trial/company_research_trial.py company_research_trial/agent_contracts.py company_research_trial/orchestration.py company_research_trial/structured_evidence.py company_research_trial/dashboard.py company_research_trial/research_api.py scripts/semantic_decision_validation.py
 ```
 
 ## 本地看板：结果只读 + 单家公司背调
