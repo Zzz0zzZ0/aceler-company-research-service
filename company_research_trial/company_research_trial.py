@@ -2482,21 +2482,18 @@ def research_prompt(record: dict[str, Any], evidence_pack: str | None = None) ->
     product_contract = PRODUCT_CONTRACT.read_text(encoding="utf-8").strip()
     evidence = evidence_pack.strip() if evidence_pack else "无；research_status 使用 partial，不能编造事实。"
     return (
-        "使用 $aceler-company-research 对这一家公司做一次研究；只研究该实体，不研究联系人。\n"
+        "使用 $aceler-company-research 研究该实体，不研究联系人。\n"
         "严格只返回下面契约中的一个 JSON 对象；不要调用工具、搜索、shell 或 validator。逐字使用合法枚举、字段名和产品名，不得添加 wrapper、version、modules 或自由改写目录产品。\n"
         "INPUT_IDENTITY_SEED 所有字段仅为待核验主体线索。未提供字段一律未知，不能作为负面证据、降低评分或判 0；角色、工艺和产品映射只从证据包判断。\n"
-        "主体归属独立判断：结构化主体判断只是提醒，不是评分门禁。结合域名、名称/品牌、地址、业务和集团关系；合理同一主体可标 partial/ambiguous、降低 confidence，仍要根据实质定位评分。不同主体或无联系集团不得借用。\n"
-        "source_type 只能逐字使用：官网、官方领英、政府/注册、公司文件、项目业主/政府、行业组织、可靠媒体、其他。\n"
-        "运营角色中，相关工业矿物、陶瓷/磨料原料、金属、化学品或互补材料的制造商使用“材料生产商”。商业关系可使用“供应合作伙伴”或“产品组合合作伙伴”；不要为了套入“潜在客户”而虚构其会采购 Aceler 产品。\n"
-        "匹配分衡量目录产品与工艺的整体商业相关性。未公开采购单或供应商不能否定已有公司证据支持的技术适配；公司规模与物料吞吐必须影响 consumption_intensity，购买、供货、转售、安装材料采购或规格控制证据必须影响 company_role_fit 和整体商业优先级。\n"
-        "四项决策字段须在本次 JSON 一次返回，不得另开调用。\n"
+        "主体归属独立判断：结构化主体判断只是提醒，不是评分门禁。合理同一主体可标 partial/ambiguous、降低 confidence，仍要根据实质定位评分。不同主体或无联系集团不得借用。\n"
+        "未公开采购单或供应商不能否定已有公司证据支持的技术适配；公司规模与物料吞吐必须影响 consumption_intensity，购买、供货、转售、安装材料采购或规格控制证据必须影响 company_role_fit 和整体商业优先级。\n"
+        "本次 JSON 一次返回，不得另开调用。\n"
         "允许基于公司已确认的产品、工艺、配方族、服务或经营材料做合理工业推断；证据未公开私有配方、供应商或采购单时标为“推测”并降低置信度，不能因此清零。仅有行业标签或遥远邻接关系仍不足以加分。\n"
         "区分原料、成品和安装：安装或转售成品不证明采购其上游原料。工程/OEM 仅在明确材料供货、耐材包、安装采购、配方或规格控制时构成渠道；设备/EPC/行业邻接不构成。历史经营证据不能单独支持当前潜在客户；不得借用未连接实体的集团事实。\n"
         "已确认的公司级实质经营活动高于宽泛行业标签。\n"
         "政府/注册来源明确列出具体制造活动可支持低置信定位，但不得写成已确认当前产线；不设置固定底分。\n"
         "分销、工程/规格控制或相关上游价值不能只计入上限 10 分的 company_role_fit；按应用、目录、吞吐、复购和角色评五项。\n"
-        "成品内部组分可为投入；磨料制造商的运营角色写“终端用户”。\n"
-        "procurement_directions 最多保留 3 个证据最强、最值得切入的目录产品；每个对象必须包含契约中的全部字段和至少一个 evidence_id。\n"
+        "成品内部组分可作投入；磨料制造商运营角色写“终端用户”。\n"
         "\n"
         "INPUT_IDENTITY_SEED:\n" + json.dumps(identity, ensure_ascii=False) + "\n\n"
         "REPORT_CONTRACT（运行时唯一 schema 与评分规则）:\n---BEGIN REPORT CONTRACT---\n"
@@ -2506,7 +2503,7 @@ def research_prompt(record: dict[str, Any], evidence_pack: str | None = None) ->
         + product_contract
         + "\n---END PRODUCT CONTRACT---\n\n"
         "ANYSEARCH_EVIDENCE_PACK:\n---BEGIN EVIDENCE---\n" + evidence + "\n---END EVIDENCE---\n\n"
-        "FINAL_SEMANTIC_CHECK：有证据的 PAC/PACl 制造、销售/分销或持续投加是直接目录路径，不是 CAC 的字面弱关联；其他目录品无关或吞吐/采购未公开不得否定该路径。已确认目录分销或上游供应/组合路线在 product_match>=5、commercial_match=4时使用4分跟进例外；不得以 commercial_match<4 跟进。一般水处理标签不足。证实高纯技术陶瓷的目录化学/工艺匹配，不因成品形态或私有规格/采购未公开而否定；只对有证据的规格冲突降产品分。\n"
+        "FINAL_SEMANTIC_CHECK：有证据的 PAC/PACl 制造、销售/分销或持续投加是直接目录路径；一般水处理标签不足，其他目录品无关或吞吐/采购未公开不得否定该路径。product_match>=5、commercial_match=4不是自动跟进规则。商业4分例外必须引用公司级证据支持的具体商业动作：持续消耗/制造投入、实际分销、材料随项目交付/采购、规格控制或可落地互补供应；仅规模或进入条件可未知。设备制造、EPC或客户行业不能代替这些动作，同业/组合重合也不等于交易路径；不得以 commercial_match<4 跟进。确认制造高纯氧化铝陶瓷、陶瓷粉体或其他明确化学体系的技术陶瓷时，合理原料投入路线不因私有规格或供应商未公开而消失；仅销售或安装成品不证明原料采购。\n"
         "FINAL_OUTPUT_LANGUAGE：返回前检查公司定位、角色理由、评分依据、流程/衬里说明及采购方向的用途、依据和下一步问题；除公司/人名、品牌、目录产品、牌号、工艺缩写、数字和单位外，所有展示性自由文本必须使用简洁、自然的中文。字段名、枚举、URL 和 evidence_id 不得翻译。只返回 JSON。"
     )
 
@@ -2551,6 +2548,7 @@ def low_score_review_prompt(
         "目录项 Calcium Aluminate Cement & PAC 包含 CAC 耐火水泥和 PAC/PACl 聚合氯化铝两条独立路线；证据确认制造或分销 Poly Aluminum/Aluminium Chloride、PAC 或 PACl 时就是直接目录重合，不得说成‘不同化学类别’或与 CAC 混淆后清零。"
         "已证实的 PAC/PACl 持续消耗或 EPC 供货/代采/指定也是终端或渠道路径，无需耐材邻接。"
         "已证实的高纯技术陶瓷化学/工艺匹配不得仅因规格或采购未公开降为遥远邻接；有证据的规格冲突除外。"
+        "已确认制造高纯氧化铝陶瓷、陶瓷粉体或其他明确化学体系的技术陶瓷时，必须复查其合理原料投入和周期性生产路线；仅销售、安装成品或服务相关客户不建立该路线。"
         "对已确认制造目录材料或真正互补材料的上游生产商，应评估供应合作/产品组合路径的产品重合、工业规模、复购和角色价值；不得因对方未向 Aceler 采购而把已确认的供应/组合路径压低。"
         "对这类上游生产商，production_process_need 评其已证实服务的下游耐材/陶瓷/磨料应用，catalog_fit 评其直接或可替代材料重合，consumption_intensity 评工业供应规模，demand_recurrence 评持续销售/供应周期；不得因关系标签是‘同行’就只留下 company_role_fit 或把前四项压低。"
         "如果上次 rationale 把‘同行/竞争’、‘不是 Aceler 的买家’、‘未公开新供应商缺口’或‘私有配方/采购未公开’当成降低已证实技术、供应、分销或组合路径的理由，上次结果就语义不一致，必须删除该降分因素并按五项定义重算，不得原样保留。"
