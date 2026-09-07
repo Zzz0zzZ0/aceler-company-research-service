@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import os
+import re
 import statistics
 import sys
 import time
@@ -23,6 +25,33 @@ from company_research_trial.company_research_trial import DEFAULT_HERMES, load_e
 DEFAULT_SOURCE = ROOT / "outputs" / "relevance-rerank-validation" / "20260904T033233Z"
 DEFAULT_LABELS = ROOT / "outputs" / "semantic-decision-validation" / "20260904T085617Z-full100-repeat" / "summary.json"
 OUTPUT_ROOT = ROOT / "outputs" / "semantic-decision-validation"
+
+
+def crm_markdown_dataset(path: Path) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
+    """Read identity seeds and human labels from the eight-column CRM table."""
+    records: list[dict[str, Any]] = []
+    labels: dict[int, dict[str, Any]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not re.match(r"^\|\s*\d+\s*\|", line):
+            continue
+        columns = [value.strip().replace("**", "") for value in line.replace("\\|", "__PIPE__").strip().strip("|").split("|")]
+        columns = [value.replace("__PIPE__", "|") for value in columns]
+        if len(columns) != 8:
+            raise ValueError(f"CRM row must contain eight columns: {line[:120]}")
+        index = int(columns[0])
+        url = re.search(r"https?://[^\s)]+", columns[5])
+        record = {"id": f"crm-{index:03d}", "name": columns[4], "country": columns[6]}
+        if url:
+            record["website"] = url.group(0)
+        records.append(record)
+        labels[index] = {
+            "product_match": int(columns[1]),
+            "commercial_match": int(columns[2]),
+            "follow_up": columns[3],
+        }
+    if not records or [int(record["id"].split("-")[1]) for record in records] != list(range(1, len(records) + 1)):
+        raise ValueError("CRM Markdown must contain consecutively numbered rows starting at 1")
+    return records, labels
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -53,34 +82,56 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=5)
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--tag", default="multi-agent-v2")
+    parser.add_argument("--crm-markdown", type=Path, help="Run live research from an eight-column CRM Markdown test set")
+    parser.add_argument("--refresh-evidence-cache", action="store_true")
+    parser.add_argument("--resume-run-dir", type=Path, help="Reuse valid results and rerun only failed or missing companies")
     args = parser.parse_args()
     load_env_file(ROOT / "config" / "local.env")
 
-    records = json.loads((args.source / "input-records.json").read_text(encoding="utf-8"))[: args.limit]
-    label_rows = {
-        row["index"]: row["manual"]
-        for row in json.loads(args.labels.read_text(encoding="utf-8"))["rows"]
-    }
+    if args.crm_markdown:
+        records, label_rows = crm_markdown_dataset(args.crm_markdown.resolve())
+        records = records[: args.limit]
+    else:
+        records = json.loads((args.source / "input-records.json").read_text(encoding="utf-8"))[: args.limit]
+        label_rows = {
+            row["index"]: row["manual"]
+            for row in json.loads(args.labels.read_text(encoding="utf-8"))["rows"]
+        }
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = OUTPUT_ROOT / f"{stamp}-{args.tag}"
-    run_dir.mkdir(parents=True)
+    run_dir = args.resume_run_dir.resolve() if args.resume_run_dir else OUTPUT_ROOT / f"{stamp}-{args.tag}"
+    run_dir.mkdir(parents=True, exist_ok=bool(args.resume_run_dir))
+    (run_dir / "input-records.json").write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     started = time.monotonic()
 
     def run(index: int, record: dict[str, Any]) -> dict[str, Any]:
-        evidence = (args.source / "records" / f"{index:03d}" / "structured-evidence.md").read_text(encoding="utf-8")
+        evidence = None
+        if not args.crm_markdown:
+            evidence = (args.source / "records" / f"{index:03d}" / "structured-evidence.md").read_text(encoding="utf-8")
         return research_one(
             record,
             index,
             run_dir,
             hermes=DEFAULT_HERMES,
             evidence_pack=evidence,
-            use_anysearch=False,
+            use_anysearch=bool(args.crm_markdown),
             max_attempts=3,
+            refresh_evidence_cache=args.refresh_evidence_cache,
         )
 
     results: dict[int, dict[str, Any]] = {}
+    if args.resume_run_dir:
+        for index, record in enumerate(records, 1):
+            result_path = run_dir / "records" / f"{index:03d}-{record['id']}" / "result.json"
+            if result_path.is_file():
+                try:
+                    item = json.loads(result_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if item.get("status") == "valid":
+                    results[index] = item
+    pending = [(index, record) for index, record in enumerate(records, 1) if index not in results]
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(run, index, record): index for index, record in enumerate(records, 1)}
+        futures = {pool.submit(run, index, record): index for index, record in pending}
         for completed, future in enumerate(concurrent.futures.as_completed(futures), 1):
             index = futures[future]
             try:
@@ -149,14 +200,29 @@ def main() -> int:
         }
         for role, values in all_sizes.items()
     }
+    wall_seconds = time.monotonic() - started
+    if args.resume_run_dir:
+        result_paths = list(run_dir.glob("records/*/result.json"))
+        if result_paths:
+            created_at = getattr(run_dir.stat(), "st_birthtime", run_dir.stat().st_mtime)
+            wall_seconds = max(path.stat().st_mtime for path in result_paths) - created_at
+    anysearch_calls = sum(
+        int((item.get("anysearch") or {}).get("search_calls") or 0)
+        + int((item.get("anysearch") or {}).get("extract_calls") or 0)
+        for item in results.values()
+    )
     summary = {
         "run_dir": str(run_dir),
-        "source_run": str(args.source),
+        "source_run": str(args.crm_markdown.resolve() if args.crm_markdown else args.source),
         "companies": len(records),
         "workers": args.workers,
-        "model": "MiniMax-M3 via Hermes",
-        "anysearch_calls": 0,
-        "wall_seconds": round(time.monotonic() - started, 1),
+        "model": os.getenv("ACELER_HERMES_MODEL", "MiniMax-M3"),
+        "provider": os.getenv("ACELER_HERMES_PROVIDER", "minimax-cn"),
+        "evidence_mode": "live" if args.crm_markdown else "saved_structured",
+        "anysearch_calls": anysearch_calls,
+        "wall_seconds": round(max(0.0, wall_seconds), 1),
+        "resumed": bool(args.resume_run_dir),
+        "skipped_valid": len(records) - len(pending),
         "metrics": {
             **counts,
             "recall": round(recall, 4),
@@ -179,7 +245,7 @@ def main() -> int:
     (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report = (
         "# 多 Agent v2 语义验证\n\n"
-        f"- 样本：{len(records)} 家；并发：{args.workers}；AnySearch：0 次\n"
+        f"- 样本：{len(records)} 家；并发：{args.workers}；AnySearch：{anysearch_calls} 次\n"
         f"- 召回率：{recall:.2%}；精确率：{precision:.2%}\n"
         f"- TP/FP/TN/FN：{tp}/{fp}/{tn}/{fn}；不可评分：{counts['unscorable_positive'] + counts['unscorable_negative']}\n"
         f"- Agent 调用：{summary['agent_calls']}；墙钟时间：{summary['wall_seconds']} 秒\n"

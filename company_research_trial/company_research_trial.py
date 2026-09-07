@@ -2757,12 +2757,14 @@ def _invoke_hermes(
     input_chars = len(prompt)
     usage_path = usage_path or record_dir / "hermes-usage.json"
     raw_path = raw_path or record_dir / "hermes-raw.txt"
+    model = os.getenv("ACELER_HERMES_MODEL", DEFAULT_HERMES_MODEL)
+    provider = os.getenv("ACELER_HERMES_PROVIDER", DEFAULT_HERMES_PROVIDER)
     command = [
         str(hermes),
         "--model",
-        DEFAULT_HERMES_MODEL,
+        model,
         "--provider",
-        DEFAULT_HERMES_PROVIDER,
+        provider,
         "--reasoning",
         reasoning,
         "--ignore-rules",

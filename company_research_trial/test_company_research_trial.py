@@ -2225,6 +2225,25 @@ RAW_PAGE_BODY_MUST_NOT_REACH_DECISION_AGENTS
         self.assertNotIn("\x00", command[-1])
         self.assertEqual(command[-1], "research")
 
+    def test_hermes_model_can_be_overridden_without_changing_the_production_default(self) -> None:
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps(assessment()), stderr="")
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {"ACELER_HERMES_MODEL": "gpt-4.1", "ACELER_HERMES_PROVIDER": "copilot"},
+        ), patch("subprocess.run", return_value=completed) as mocked:
+            from company_research_trial.company_research_trial import _invoke_hermes
+
+            _invoke_hermes(
+                record_dir=Path(directory),
+                hermes=Path("/usr/local/bin/hermes"),
+                timeout=30,
+                reasoning="medium",
+                prompt="research",
+            )
+        command = mocked.call_args.args[0]
+        self.assertEqual(command[command.index("--model") + 1], "gpt-4.1")
+        self.assertEqual(command[command.index("--provider") + 1], "copilot")
+
     def test_mock_invalid_company_exhausts_three_attempts(self) -> None:
         invocation = {"assessment": None, "errors": ["Hermes output contains no JSON object"], "raw": "not json", "usage": None, "attempt": {"kind": "research", "has_json": False}, "seconds": 0.1}
         with tempfile.TemporaryDirectory() as directory, patch("company_research_trial.company_research_trial._invoke_hermes", return_value=invocation) as mocked:
