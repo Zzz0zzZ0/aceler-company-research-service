@@ -6,17 +6,19 @@
 
 | 部件 | 固定值 | 验收依据 |
 | --- | --- | --- |
-| 本仓库 | tag `repro-2026-08-31` | `HEAD` 必须指向该 tag |
-| 公司背调 Skill | 随仓库 tag 固定 | `.agents/skills/aceler-company-research` 可读 |
+| 本仓库 | 与基准机器相同的完整提交号 | 两台机器的 `git rev-parse HEAD` 一致 |
+| 公司背调 Skill | 随仓库提交固定 | `.agents/skills/aceler-company-research` 可读 |
 | Hermes Agent | `0.20.4` | 上游发布提交 `7e05e9080b2e46cd35e6f0caa016360301258823` |
-| Hermes 模型 | `MiniMax-M2.7` | profile `config.yaml` |
-| Hermes provider | `minimax-cn` | profile `config.yaml` |
-| 完整业务记忆 | 仓库版本 | SHA-256 `ecccadbc975bad1c70926801d03971227a3afeba775526bfd2f105a8aaa8daa9` |
-| profile 配置 | 仓库版本 | SHA-256 `25794c0c7d82bc31e5b218605120b304d523aa35c4d7c1c2fdce141d23bc3d09` |
+| Hermes 服务模型 | `MiniMax-M3` | 服务显式传入 `--model`；联网结果 `usage.model` |
+| Hermes provider | `minimax-cn` | 服务显式传入 `--provider`；联网结果 `usage.provider` |
+| 完整业务记忆 | 当前提交的 `config/hermes/aceler-memory/MEMORY.md` | 与已安装 MEMORY 文件逐字节一致 |
+| profile 配置 | 当前提交的 `config/hermes/aceler-memory/config.yaml` | 与已安装配置逐字节一致 |
 | AnySearch Skill | `v3.1.0` | 提交 `4d6cef918e9338c9deef43b81ac0f7e22606825f` |
 | AnySearch Node CLI | 仓库版本 | SHA-256 `e4944fef758fae860d26b15460f5940f198841c2f965775ec9a2b36092e0edf9` |
 
-当前验收机器使用 macOS、Python `3.14.6`、Node.js `22.23.1`；Hermes 自己的虚拟环境使用 Python `3.11.15`。项目代码要求 Python 3.11 及以上。Python/Node 的补丁版本不同通常不会改变背调语义，但若要排除全部环境差异，应使用上述基线。
+当前验收机器使用 macOS、Python `3.14.6`、Node.js `22.23.0`；Hermes 自己的虚拟环境使用 Python `3.11.15`。项目代码要求 Python 3.11 及以上。使用本项目 `.venv/bin/python`；不要直接复制另一台机器的 `.venv`，其解释器链接和路径可能不可用。
+
+profile 的兼容默认模型仍为 `MiniMax-M2.7`，服务会显式覆盖为 `MiniMax-M3`，无需手工修改 profile。`ACELER_HERMES_MODEL` 和 `ACELER_HERMES_PROVIDER` 可覆盖服务配置；精确复现时必须保持 M3 / minimax-cn，并核对实际 usage，不能只查看 profile。
 
 CRM 不是必需依赖。没有 CRM 的机器应从单家公司 JSON、Python API 或固定文件运行，不要伪造 CRM 字段。
 
@@ -57,19 +59,20 @@ export PATH="$HOME/.local/bin:$PATH"
 ## 2. 克隆并锁定本仓库
 
 ```bash
-git clone https://github.com/Zzz0zzZ0/aceler-company-research-service.git
+git clone --branch main https://github.com/Zzz0zzZ0/aceler-company-research-service.git
 cd aceler-company-research-service
-git checkout --detach repro-2026-08-31
+git rev-parse HEAD
 ```
 
-确认没有拉到后续漂移版本：
+以上获得当前 main。两台机器对照时，先在基准机器运行 `git rev-parse HEAD`，将其完整输出填入下方变量，再在新机器执行：
 
 ```bash
-test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 repro-2026-08-31)"
+ACELER_REPRO_REF='替换为基准机器的完整提交号'
+git checkout --detach "$ACELER_REPRO_REF"
 git status --short
 ```
 
-第二条命令应没有输出。后续所有命令默认在该仓库根目录执行。
+`git status --short` 应没有输出。后续所有命令默认在该仓库根目录执行。不要使用历史安装文档中的旧 tag 复现当前 main；项目提交号应随每次基准运行记录，不在安装脚本中写死。
 
 ## 3. 创建项目 Python 环境
 
@@ -83,7 +86,7 @@ python3 -m venv .venv
 
 ## 4. 安装固定版本 AnySearch
 
-生产链路直接调用 `~/.codex/skills/anysearch/scripts/anysearch_cli.js`，因此路径和版本都必须一致：
+生产链路通过仓库内 `anysearch_bridge.js` 调用 `~/.codex/skills/anysearch/scripts/anysearch_cli.js`，因此路径和版本都必须一致。这个外部目录不会随项目 Git 克隆一起安装：
 
 ```bash
 mkdir -p "$HOME/.codex/skills"
@@ -108,13 +111,13 @@ SHA-256 必须是：
 e4944fef758fae860d26b15460f5940f198841c2f965775ec9a2b36092e0edf9
 ```
 
-AnySearch 支持匿名低额度。需要更高额度时，只在同事本机创建 `~/.codex/skills/anysearch/.env`：
+批量复现前在同事本机配置自己的 AnySearch key，并确认它的可用额度。推荐写入被 Git 忽略的项目 `config/local.env`（已有文件时只编辑这一项，不覆盖其他配置）：
 
 ```text
 ANYSEARCH_API_KEY=<同事自己的密钥>
 ```
 
-随后执行 `chmod 600 "$HOME/.codex/skills/anysearch/.env"`。不要把密钥写进本仓库、聊天记录或安装截图。
+随后执行 `chmod 600 config/local.env`。也支持已安装 AnySearch 的 `.env`，但两台机器须确认实际使用的配置来源。项目加载配置时保留父进程已存在的环境变量；bridge 将非空服务 key 作为 CLI 参数内部传递，优先于 AnySearch 自己的 `.env`。不要提交密钥，也不要将其贴到聊天或截图中。
 
 ## 5. 安装固定版本 Hermes Agent
 
@@ -183,17 +186,13 @@ chmod 600 "$HOME/.hermes/profiles/aceler-memory/.env"
 确认配置和完整记忆没有被缩减或手工改写：
 
 ```bash
-shasum -a 256 \
-  "$HOME/.hermes/profiles/aceler-memory/config.yaml" \
+cmp config/hermes/aceler-memory/config.yaml \
+  "$HOME/.hermes/profiles/aceler-memory/config.yaml"
+cmp config/hermes/aceler-memory/MEMORY.md \
   "$HOME/.hermes/profiles/aceler-memory/memories/MEMORY.md"
 ```
 
-预期依次为：
-
-```text
-25794c0c7d82bc31e5b218605120b304d523aa35c4d7c1c2fdce141d23bc3d09
-ecccadbc975bad1c70926801d03971227a3afeba775526bfd2f105a8aaa8daa9
-```
+两条命令均应退出 0 且没有输出。验收脚本也从当前仓库文件计算哈希并比较，避免业务记忆更新后安装说明仍引用旧哈希。
 
 `hermes profile create` 应同时生成：
 
@@ -232,17 +231,24 @@ Codex repo-scoped Skill 的目录和自动发现规则见 [OpenAI Codex Skills d
 ./scripts/verify-install.sh
 ```
 
-脚本只检查版本、哈希、密钥是否存在以及本仓库测试，不读取密钥值，不调用 AnySearch，不调用 MiniMax，不读取 CRM，也不产生生产背调结果。
+默认检查当前 checkout 并输出提交号；跨机器精确对照时，还要传入第 2 节记录的基准提交号：
+
+```bash
+./scripts/verify-install.sh "$ACELER_REPRO_REF"
+```
+
+指定基准时还要求受跟踪文件没有未提交修改。脚本检查版本、哈希、实际服务模型配置、密钥是否非空及本仓库测试，不输出密钥，不调用 AnySearch 网络接口或 MiniMax，不读取 CRM，也不产生生产背调结果。离线通过不代表网络、额度或密钥认证已通过。
 
 通过标准：
 
-- 仓库 tag、AnySearch commit 和 CLI 哈希一致；
+- 仓库提交与指定基准一致（如指定），AnySearch commit 和 CLI 哈希一致；
 - Hermes 为 `0.20.4`；
+- 服务调用配置为 MiniMax-M3 / minimax-cn；
 - profile 配置和完整 MEMORY 哈希一致；
 - `aceler-memory` 包装命令存在；
 - profile `.env` 中存在非空 `MINIMAX_CN_API_KEY`，但值不会输出；
-- validator 自检为 `5/5`；
-- 项目单元测试全部通过；
+- validator 自检为 `6/6`；
+- 项目全部七个显式测试模块通过（避免同名模块/包导致 discovery 导入冲突）；
 - Python 编译检查通过。
 
 任何一项失败都不要开始联网批量测试。
@@ -270,23 +276,23 @@ printf '%s\n' '{"name":"Hatria","website":"https://hatria.com"}' \
 3. `score`、`level`、产品名和工艺判断通过仓库 validator。
 4. 推测仍有明确的证据状态或待确认问题，不能伪装成已确认事实。
 5. 展示文本以中文为主，但产品专名、公司/人名、牌号、工艺缩写、数字和单位可保留原文。
-6. `usage` 和输出目录内的原始 Hermes、验证及本地化审计文件存在。
+6. `usage.model` 为 `MiniMax-M3`，`usage.provider` 为 `minimax-cn`；输出目录内的原始 Hermes、验证及适用的本地化审计文件存在。
 
-联网结果会随网页变化而变化，所以“精确复现”保证的是同一执行逻辑、模型配置、记忆、检索器和规则，不承诺未来网页内容和模型采样逐字一致。若需要数值 A/B，必须给两台机器使用同一份冻结证据包、相同输入、相同并发和相同 reasoning 参数。
+联网结果会随网页变化而变化，所以“精确复现”保证的是同一执行逻辑、模型配置、记忆、检索器和规则，不承诺未来网页内容和模型采样逐字一致。排查检索差异时保留实时检索，记录各自的网络、缓存和调用情况；仅比较后续语义判断时，才给两台机器使用同一份已保存证据包、相同输入、并发和 reasoning 参数，并标明是语义 A/B。
 
 ## 10. 启动看板
 
-本机访问：
+启动看板：
 
 ```bash
 .venv/bin/python -m company_research_trial.dashboard
 ```
 
-默认地址是 `http://127.0.0.1:8765/`。仅在可信局域网和已确认防火墙规则时使用：
+默认监听 `0.0.0.0:8766`，本机入口为 `http://127.0.0.1:8766/`，应在可信局域网使用。只允许本机访问时显式指定：
 
 ```bash
 .venv/bin/python -m company_research_trial.dashboard \
-  --host 0.0.0.0 --port 8765
+  --host 127.0.0.1 --port 8766
 ```
 
 ## 11. 可选 CRM 只读抽样
@@ -296,7 +302,7 @@ printf '%s\n' '{"name":"Hatria","website":"https://hatria.com"}' \
 确需从 Twenty CRM 抽样时：
 
 ```bash
-cp config/local.env.example config/local.env
+test -f config/local.env || cp config/local.env.example config/local.env
 chmod 600 config/local.env
 ```
 
@@ -306,7 +312,27 @@ chmod 600 config/local.env
 
 ### 同事准确率明显低于基准
 
-依次核对：仓库 tag、Hermes `0.20.4`、MiniMax-M2.7、`minimax-cn`、两个 profile 哈希、AnySearch commit、Skill 路径和离线测试。最常见的“能运行但效果不同”原因是只复制代码，没有复制完整 MEMORY，或者使用了默认 Hermes profile/其他模型。
+依次核对：仓库提交和工作区、Hermes `0.20.4`、usage 中实际的 MiniMax-M3 / minimax-cn、profile 与仓库文件是否一致、AnySearch commit、Skill 路径和离线测试。区分检索失败、模型调用失败和评分差异，不从“通过率降低”直接推断模型变差。
+
+### 同一测试集在另一台 Mac 检索失败增多
+
+- 比较运行目录实际保存的 `input-records.json`，包括每家的 `name` 和 `website`；同名 Markdown 文件不足以证明输入一致。当前 CRM 批量入口要求八列（含地址），且网址应是裸 HTTP(S) URL。七列文件须在副本中补空地址列，Markdown 链接须先转换为其真实链接地址；保留原文件、公司和人工标签。
+- 对比 `anysearch-meta.json` 中的 `cache_hit`、`local_extracted_urls`、`error`、`selected_urls`。本流程优先在本机抓取网页，再尝试 AnySearch extract；整体有效率不是 AnySearch API 成功率。缓存位于被忽略的 `outputs/anysearch-cache/`，有效期七天，不会随 Git 克隆复制。
+- 核对外部 AnySearch CLI、Node 路径、key 来源及额度。`config/local.env`、`.venv/`、AnySearch 外部安装和系统网络配置均不包含在 Git 仓库中。
+- Python 会读取 macOS 系统代理，不能只看终端的 `HTTP_PROXY`。用下面命令查看代理端点，不输出认证信息；不要照搬另一台机器的端口，须确认本机实际运行的代理服务。
+
+```bash
+.venv/bin/python - <<'PY'
+from urllib.request import getproxies
+from urllib.parse import urlsplit
+for kind, value in getproxies().items():
+    if kind != "no":
+        proxy = urlsplit(value)
+        print(kind, proxy.scheme, proxy.hostname, proxy.port)
+PY
+```
+
+失败公司的 `result.json` 可能只有 `AnySearch found no trusted substantive company page`，没有保存底层 metadata。这是最终检索失败信号，不能单凭它断定网络、认证或网页内容中的哪一层出错。保留失败批次，先用同一家输入对照两台环境；未经对齐不要人工改结果或用补跑结果替换原始基线。
 
 ### `AnySearch CLI unavailable`
 
@@ -347,14 +373,14 @@ grep -Eq '^MINIMAX_CN_API_KEY=.+$' \
 可将下面整段发给对方的 Codex：
 
 ```text
-请在一个新目录克隆 https://github.com/Zzz0zzZ0/aceler-company-research-service，严格按 INSTALL-CODEX.md 安装，并 checkout repro-2026-08-31。不得更换 Hermes 模型/provider，不得缩减或总结 MEMORY，不得修改 Skill、validator、证据条数、重试、零分复核、中文本地化或评分规则。先运行 scripts/verify-install.sh；只汇报版本、提交、哈希和测试结果，不输出任何密钥。离线验收全部通过后，才按文档跑 1 家 Hatria 联网 smoke test。不要连接或写入 CRM，不要发送消息，不要批量运行。若任何固定版本或哈希不一致，停止并报告具体差异，不要自行“兼容”或升级。
+请在一个新目录克隆 https://github.com/Zzz0zzZ0/aceler-company-research-service 的 main，并按当前 INSTALL-CODEX.md 安装。若提供基准机器的完整提交号，checkout 到同一提交，并把该提交号传给 scripts/verify-install.sh 验收；不要使用历史安装文档中的旧 tag。保留仓库完整 MEMORY 和 profile；服务会显式使用 MiniMax-M3 / minimax-cn，不需改动 profile 的兼容默认模型。不得修改 Skill、validator、检索、重试或评分规则。先做离线验收，只汇报版本、提交、哈希和测试结果，不输出密钥。离线通过后，按文档跑 1 家 Hatria 联网 smoke test 并核对实际 usage。不要连接或写入 CRM，不要发送消息，不要批量运行。若复现失败，保留原始结果并对照实际输入、外部 AnySearch 安装和本机代理；不要人工改判或扩大补跑。
 ```
 
 ## 完成定义
 
 只有以下三层同时通过才算复现完成：
 
-1. **安装一致**：tag、Hermes、AnySearch、profile 和 MEMORY 均通过版本/哈希检查。
+1. **安装一致**：提交、Hermes、AnySearch、profile 和 MEMORY 均通过版本/哈希检查；实际服务模型/provider 一致。
 2. **代码一致**：validator、自测、单元测试和编译检查全部通过。
 3. **调用一致**：先用无 CRM 的 1 家输入成功生成可追溯的 `valid` 结果，再决定是否扩大测试。
 

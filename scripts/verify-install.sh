@@ -2,11 +2,8 @@
 
 set -euo pipefail
 
-PROJECT_TAG="agent-orchestration-v1.1-2026-09-04"
 ANYSEARCH_COMMIT="4d6cef918e9338c9deef43b81ac0f7e22606825f"
 ANYSEARCH_SHA256="e4944fef758fae860d26b15460f5940f198841c2f965775ec9a2b36092e0edf9"
-PROFILE_SHA256="25794c0c7d82bc31e5b218605120b304d523aa35c4d7c1c2fdce141d23bc3d09"
-MEMORY_SHA256="00d3f0b7bfb8c3f71e297e03b55ca5462411f562eacba8c0008df56c68564f7a"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
@@ -28,11 +25,17 @@ hash_file() {
 
 cd "$ROOT_DIR"
 
-tag_commit="$(git rev-list -n 1 "$PROJECT_TAG" 2>/dev/null || true)"
+[[ $# -le 1 ]] || fail "用法: scripts/verify-install.sh [基准提交号或 ref]"
 head_commit="$(git rev-parse HEAD)"
-[[ -n "$tag_commit" && "$head_commit" == "$tag_commit" ]] \
-  || fail "仓库 HEAD 不是 $PROJECT_TAG"
-pass "仓库固定 tag: $PROJECT_TAG"
+if [[ $# -eq 1 ]]; then
+  expected_commit="$(git rev-parse --verify --end-of-options "${1}^{commit}" 2>/dev/null || true)"
+  [[ -n "$expected_commit" && "$head_commit" == "$expected_commit" ]] \
+    || fail "仓库 HEAD 与指定基准不一致: $1 (当前 $head_commit)"
+  git diff --quiet HEAD -- || fail "受跟踪文件存在未提交修改，无法确认与指定基准一致"
+fi
+pass "仓库提交: $head_commit"
+PROFILE_SHA256="$(hash_file config/hermes/aceler-memory/config.yaml)"
+MEMORY_SHA256="$(hash_file config/hermes/aceler-memory/MEMORY.md)"
 
 [[ -f .agents/skills/aceler-company-research/SKILL.md ]] \
   || fail "Codex repo-scoped Skill 不可读"
@@ -42,6 +45,18 @@ pass "Codex repo-scoped Skill"
 "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
   || fail "项目 Python 必须为 3.11+"
 pass "项目 Python: $("$PYTHON_BIN" --version 2>&1)"
+"$PYTHON_BIN" - <<'PY'
+import os
+from company_research_trial.company_research_trial import (
+    DEFAULT_ENV_FILE, DEFAULT_HERMES_MODEL, DEFAULT_HERMES_PROVIDER, load_env_file,
+)
+load_env_file(DEFAULT_ENV_FILE)
+model = os.getenv("ACELER_HERMES_MODEL", DEFAULT_HERMES_MODEL)
+provider = os.getenv("ACELER_HERMES_PROVIDER", DEFAULT_HERMES_PROVIDER)
+if (model, provider) != ("MiniMax-M3", "minimax-cn"):
+    raise SystemExit("FAIL  服务模型/provider 与 M3/minimax-cn 基准不一致；检查 ACELER_HERMES_MODEL/PROVIDER")
+print("PASS  服务实际调用配置: MiniMax-M3 / minimax-cn（显式覆盖 profile 默认模型）")
+PY
 
 command -v node >/dev/null 2>&1 || fail "缺少 Node.js"
 pass "Node.js: $(node --version)"
@@ -81,13 +96,18 @@ pass "Python requirements"
   company_research_trial.test_company_research_trial \
   company_research_trial.test_dashboard \
   company_research_trial.test_research_api \
-  company_research_trial.test_orchestration
+  company_research_trial.test_orchestration \
+  company_research_trial.test_structured_evidence \
+  company_research_trial.test_structured_evidence_pilot \
+  company_research_trial.test_semantic_decision_validation
 "$PYTHON_BIN" -m py_compile \
   company_research_trial/company_research_trial.py \
   company_research_trial/agent_contracts.py \
   company_research_trial/orchestration.py \
+  company_research_trial/structured_evidence.py \
   company_research_trial/dashboard.py \
-  company_research_trial/research_api.py
+  company_research_trial/research_api.py \
+  scripts/semantic_decision_validation.py
 pass "validator、单元测试和 Python 编译"
 
 printf '\n离线安装验收通过；本脚本未调用 AnySearch、MiniMax 或 CRM。\n'
