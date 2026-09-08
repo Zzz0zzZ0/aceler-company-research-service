@@ -316,6 +316,8 @@ chmod 600 config/local.env
 
 ### 同一测试集在另一台 Mac 检索失败增多
 
+注意：本分支的检索可靠性试验于 2026-09-08 未通过验收，已恢复 `f8e38ed` 基线。以下标为“试验分支”的行为仅作试验记录，不应部署；正常安装仍使用 main 的文档和代码。
+
 - 比较运行目录实际保存的 `input-records.json`，包括每家的 `name` 和 `website`；同名 Markdown 文件不足以证明输入一致。检索可靠性试验分支的 CRM 批量入口直接接受七列/八列（可含地址），支持裸 HTTP(S) URL、自动链接和 Markdown href；无需手工转换原文件。旧基线仍需兼容副本；不要混用两种入口的结果。
 - 对比 `anysearch-meta.json` 中的 `cache_hit`、`local_extracted_urls`、`error`、`selected_urls`。本流程优先在本机抓取网页，再尝试 AnySearch extract；整体有效率不是 AnySearch API 成功率。缓存位于被忽略的 `outputs/anysearch-cache/`，有效期七天，不会随 Git 克隆复制。
 - 核对外部 AnySearch CLI、Node 路径、key 来源及额度。`config/local.env`、`.venv/`、AnySearch 外部安装和系统网络配置均不包含在 Git 仓库中。
