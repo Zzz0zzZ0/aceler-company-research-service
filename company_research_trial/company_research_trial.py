@@ -2302,9 +2302,10 @@ def recall_first_anysearch_pack(
     max_sources: int = MAX_EVIDENCE_PAGES,
     cache_dir: Path | None = None,
     refresh_cache: bool = False,
+    failure_only: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """Run one bounded agentic recovery when deterministic retrieval fails or is visibly weak."""
-    if not record.get("website"):
+    if not record.get("website") and not failure_only:
         evidence_pack, metadata = agentic_anysearch_pack(
             record,
             record_dir,
@@ -2328,11 +2329,13 @@ def recall_first_anysearch_pack(
             cache_dir=cache_dir,
             refresh_cache=refresh_cache,
         )
+        if failure_only:
+            return primary_pack, primary_meta
         primary_gaps = _retrieval_gap_reasons(primary_meta, primary_pack)
         if not primary_gaps:
             return primary_pack, primary_meta
     except Exception as exc:
-        primary_error = str(exc)
+        primary_error = _redact_sensitive(str(exc))
 
     try:
         recovered_pack, recovered_meta = agentic_anysearch_pack(
@@ -2347,7 +2350,7 @@ def recall_first_anysearch_pack(
         identity_rejected = "selected no URL" in str(exc) or "Semantic identity rejected" in str(exc)
         if not primary_pack or identity_rejected or "identity_unverified" in primary_gaps:
             raise AnySearchPackError(
-                f"Primary retrieval failed ({primary_error}); recall recovery failed ({exc})"
+                f"Primary retrieval failed ({primary_error}); recall recovery failed ({_redact_sensitive(str(exc))})"
             ) from exc
         primary_meta["recall_recovery"] = {
             "attempted": True,
@@ -2355,6 +2358,21 @@ def recall_first_anysearch_pack(
             "error": str(exc),
         }
         return primary_pack, primary_meta
+
+    if failure_only:
+        if recovered_meta.get("identity_status") != "confirmed" or recovered_meta.get("identity_unresolved_after_retry"):
+            raise AnySearchPackError("Failure recovery did not confirm the target company identity")
+        metadata = dict(recovered_meta)
+        metadata.update({
+            "mode": "failure_recovery",
+            "call_counts_scope": "recovery_only",
+            "retrieval_agent_calls": len(list(record_dir.glob("agentic-*-raw.txt"))),
+            "recall_recovery": {
+                "attempted": True, "accepted": True, "trigger": "primary_failed",
+                "primary_error": primary_error,
+            },
+        })
+        return recovered_pack, metadata
 
     recovered_gaps = _retrieval_gap_reasons(recovered_meta, recovered_pack)
     if primary_pack and primary_gaps.issubset(recovered_gaps):
@@ -3522,7 +3540,10 @@ def research_one(
                     refresh_cache=True,
                 )
             else:
-                evidence_pack, search_meta = anysearch_pack(record, cache_dir=ANYSEARCH_CACHE_DIR)
+                evidence_pack, search_meta = recall_first_anysearch_pack(
+                    record, record_dir, hermes=hermes, timeout=timeout, reasoning=reasoning,
+                    cache_dir=ANYSEARCH_CACHE_DIR, failure_only=True,
+                )
             (record_dir / "anysearch-evidence.md").write_text(evidence_pack, encoding="utf-8")
             (record_dir / "anysearch-meta.json").write_text(json.dumps(search_meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         except Exception as exc:
@@ -3531,7 +3552,7 @@ def research_one(
     elif evidence_pack:
         (record_dir / "anysearch-evidence.md").write_text(evidence_pack, encoding="utf-8")
     if not evidence_pack.strip() or not _pack_urls(evidence_pack):
-        errors.append("No trusted AnySearch evidence pack; Hermes was not called")
+        errors.append("No trusted AnySearch evidence pack; scoring agents were not called")
         validation = {
             "valid": False,
             "score": 0,

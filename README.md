@@ -78,6 +78,12 @@ stdout 始终只有一个 JSON 对象。退出码 `0` 表示 `valid`，`1` 表�
 
 每家公司流程固定为：来源中立的 identity seed（可只有公司名）→ AnySearch 批量检索主体/产品与工厂/工艺并提取最多 3 页 → 长页面 Evidence Agent 引文核验与事实压缩 → Catalog Router 召回优先选取相关产品行 → Lead → 条件 Recall Critic → 按需 Arbiter → 仓库 validator。各角色只获得完成自己任务所需的上下文：Lead 不再接收整页原文和全部产品规则；Recall 独立使用完整产品矩阵审计 Router 漏选；Arbiter 只看争议产品规则和两份候选。原始证据仍保存在审计文件中，不用业务正则替代模型做语义判断。
 
+普通请求仅在主检索抛出失败时调用一次已有的语义备用检索。主检索成功时直接返回原证据（包括缓存与只有公司名的输入），不因证据偏弱而扩展检索或改写证据。备用检索必须明确返回 `identity_status=confirmed` 且不存在重试后主体仍未解决的标记，才继续原评分流程；`related`、`ambiguous`、缺失身份状态或备用检索失败均继续返回失败。此身份门槛不代表产品/工艺缺口已关闭，也不代表最终跟进判断正确。显式 `refresh_evidence_cache=True` 仍保留原有刷新检索语义。
+
+成功恢复时 `anysearch-meta.json` 的 `mode` 为 `failure_recovery`，`recall_recovery.primary_error` 保存脱敏的主检索错误，`retrieval_agent_calls` 单列检索角色调用数。`call_counts_scope=recovery_only` 表示其中的检索/提取计数仅覆盖备用检索：旧主检索异常不携带完整计数，不能将这些数字当作整条失败恢复链路的总成本。没有可信证据时，错误明确说明评分 Agent 未启动。
+
+2026-09-08 的最小失败恢复版本通过 136 项回归、validator 自检与编译；100-3 历史证据路由回放中，原 98 家成功记录全部原样返回、不调用补检，2 条失败记录的备用证据中接受 1 条、拒绝主体不确定的 1 条。此回放没有重新评分，不能称为 99/100 全流程有效。真实第 88 家联网回测本次仅确认关联主体，仍拒绝；独立 Hatria 故障注入测试（只模拟主检索抛错，备用检索和评分均真实执行）得到 validator-valid 结果。记录在本地 `outputs/failure-only-recovery-20260908/`。本次只保留失败恢复，没有恢复此前已撤回的默认弱证据扩展，也不声称整体精确率或跨 Mac 有效率已提高。
+
 输入字段只是待核验线索；公司角色、工艺和产品映射以本次证据包为准。AnySearch 证据包只采集一次，后续 Agent 禁止搜索。Lead 或校验失败时默认最多尝试 3 次，可用 `--max-attempts 1` 关闭重试。重试只修正 JSON、枚举和证据引用，不自动放行；每轮保留独立的 raw、usage、`evidence-bundle.json` 和 `orchestration.json` 审计文件。
 
 ### 当前验证基线

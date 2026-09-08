@@ -318,6 +318,7 @@ chmod 600 config/local.env
 
 - 比较运行目录实际保存的 `input-records.json`，包括每家的 `name` 和 `website`；同名 Markdown 文件不足以证明输入一致。当前 CRM 批量入口要求八列（含地址），且网址应是裸 HTTP(S) URL。七列文件须在副本中补空地址列，Markdown 链接须先转换为其真实链接地址；保留原文件、公司和人工标签。
 - 对比 `anysearch-meta.json` 中的 `cache_hit`、`local_extracted_urls`、`error`、`selected_urls`。本流程优先在本机抓取网页，再尝试 AnySearch extract；整体有效率不是 AnySearch API 成功率。缓存位于被忽略的 `outputs/anysearch-cache/`，有效期七天，不会随 Git 克隆复制。
+- 普通请求会在主检索失败后自动尝试一轮语义备用检索；已有证据不触发扩展。成功恢复可见 `mode=failure_recovery` 与 `recall_recovery.primary_error`。仅关联主体或主体不确定仍失败，不能为凑有效数放行。`call_counts_scope=recovery_only` 的计数不含失败主检索的未知开销；联网结果和完整日志需要一起核对。
 - 核对外部 AnySearch CLI、Node 路径、key 来源及额度。`config/local.env`、`.venv/`、AnySearch 外部安装和系统网络配置均不包含在 Git 仓库中。
 - Python 会读取 macOS 系统代理，不能只看终端的 `HTTP_PROXY`。用下面命令查看代理端点，不输出认证信息；不要照搬另一台机器的端口，须确认本机实际运行的代理服务。
 

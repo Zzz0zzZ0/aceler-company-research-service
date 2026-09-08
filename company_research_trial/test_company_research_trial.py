@@ -2270,11 +2270,49 @@ RAW_PAGE_BODY_MUST_NOT_REACH_DECISION_AGENTS
         self.assertEqual(mocked.call_args_list[1].kwargs["raw_path"].name, "hermes-raw-attempt-2.txt")
 
     def test_anysearch_failure_fails_before_hermes(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch("company_research_trial.company_research_trial.anysearch_pack", side_effect=RuntimeError("no trusted page")), patch("company_research_trial.company_research_trial._invoke_hermes") as mocked:
+        with tempfile.TemporaryDirectory() as directory, patch("company_research_trial.company_research_trial.anysearch_pack", side_effect=RuntimeError("no trusted page")), patch("company_research_trial.company_research_trial.agentic_anysearch_pack", side_effect=RuntimeError("recovery unavailable")), patch("company_research_trial.company_research_trial._invoke_hermes") as mocked:
             item = research_one(record(), 1, Path(directory), hermes=Path("/bin/true"))
         mocked.assert_not_called()
         self.assertEqual(item["status"], "failed")
-        self.assertIn("Hermes was not called", " ".join(item["errors"]))
+        self.assertIn("scoring agents were not called", " ".join(item["errors"]))
+
+    def test_failure_only_keeps_successful_evidence_even_when_weak_or_name_only(self) -> None:
+        evidence = (EVIDENCE, {"external_fallback": True, "selected_page_scores": [{"categories": ["identity"]}]})
+        for seed in (record(), {"name": "Development Materials"}):
+            with self.subTest(seed=seed), tempfile.TemporaryDirectory() as directory, patch(
+                "company_research_trial.company_research_trial.anysearch_pack", return_value=evidence
+            ) as primary, patch("company_research_trial.company_research_trial.agentic_anysearch_pack") as recovery:
+                result = recall_first_anysearch_pack(seed, Path(directory), failure_only=True)
+                self.assertEqual(result, evidence)
+                primary.assert_called_once()
+                recovery.assert_not_called()
+
+    def test_default_failure_recovery_reaches_scoring_once_with_confirmed_identity(self) -> None:
+        invocation = {"assessment": assessment(), "errors": [], "raw": "valid", "usage": None, "attempt": {}, "seconds": 0.1}
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "company_research_trial.company_research_trial.anysearch_pack", side_effect=RuntimeError("no trusted page")
+        ) as primary, patch(
+            "company_research_trial.company_research_trial.agentic_anysearch_pack",
+            return_value=(EVIDENCE, {"identity_status": "confirmed", "search_calls": 2, "extract_calls": 1}),
+        ) as recovery, patch("company_research_trial.company_research_trial._invoke_hermes", return_value=invocation):
+            result = research_one(record(), 1, Path(directory), hermes=Path("/bin/true"))
+        primary.assert_called_once()
+        recovery.assert_called_once()
+        self.assertEqual(result["status"], "valid")
+        self.assertEqual(result["anysearch"]["mode"], "failure_recovery")
+        self.assertEqual(result["anysearch"]["recall_recovery"]["primary_error"], "no trusted page")
+
+    def test_failure_recovery_rejects_ambiguous_or_unresolved_identity(self) -> None:
+        for metadata in ({"identity_status": "ambiguous"}, {"identity_status": "related"}, {"identity_status": "confirmed", "identity_unresolved_after_retry": True}, {}):
+            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as directory, patch(
+                "company_research_trial.company_research_trial.anysearch_pack", side_effect=RuntimeError("no trusted page")
+            ), patch(
+                "company_research_trial.company_research_trial.agentic_anysearch_pack", return_value=(EVIDENCE, metadata)
+            ) as recovery, patch("company_research_trial.company_research_trial._invoke_hermes") as scoring:
+                result = research_one(record(), 1, Path(directory), hermes=Path("/bin/true"))
+                self.assertEqual(result["status"], "failed")
+                recovery.assert_called_once()
+                scoring.assert_not_called()
 
     def test_refresh_path_uses_recall_first_retrieval(self) -> None:
         invocation = {"assessment": assessment(), "errors": [], "raw": "valid", "usage": None, "attempt": {}, "seconds": 0.1}
