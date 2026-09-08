@@ -316,7 +316,7 @@ chmod 600 config/local.env
 
 ### 同一测试集在另一台 Mac 检索失败增多
 
-- 比较运行目录实际保存的 `input-records.json`，包括每家的 `name` 和 `website`；同名 Markdown 文件不足以证明输入一致。当前 CRM 批量入口要求八列（含地址），且网址应是裸 HTTP(S) URL。七列文件须在副本中补空地址列，Markdown 链接须先转换为其真实链接地址；保留原文件、公司和人工标签。
+- 比较运行目录实际保存的 `input-records.json`，包括每家的 `name` 和 `website`；同名 Markdown 文件不足以证明输入一致。检索可靠性试验分支的 CRM 批量入口直接接受七列/八列（可含地址），支持裸 HTTP(S) URL、自动链接和 Markdown href；无需手工转换原文件。旧基线仍需兼容副本；不要混用两种入口的结果。
 - 对比 `anysearch-meta.json` 中的 `cache_hit`、`local_extracted_urls`、`error`、`selected_urls`。本流程优先在本机抓取网页，再尝试 AnySearch extract；整体有效率不是 AnySearch API 成功率。缓存位于被忽略的 `outputs/anysearch-cache/`，有效期七天，不会随 Git 克隆复制。
 - 核对外部 AnySearch CLI、Node 路径、key 来源及额度。`config/local.env`、`.venv/`、AnySearch 外部安装和系统网络配置均不包含在 Git 仓库中。
 - Python 会读取 macOS 系统代理，不能只看终端的 `HTTP_PROXY`。用下面命令查看代理端点，不输出认证信息；不要照搬另一台机器的端口，须确认本机实际运行的代理服务。
@@ -332,7 +332,7 @@ for kind, value in getproxies().items():
 PY
 ```
 
-失败公司的 `result.json` 可能只有 `AnySearch found no trusted substantive company page`，没有保存底层 metadata。这是最终检索失败信号，不能单凭它断定网络、认证或网页内容中的哪一层出错。保留失败批次，先用同一家输入对照两台环境；未经对齐不要人工改结果或用补跑结果替换原始基线。
+检索可靠性试验分支会在失败时保存 `anysearch-meta.json`，可查看 `failure_stage`、`extraction_attempts`、`recall_recovery` 和 `runtime`；运行环境只记录密钥是否存在，不记录密钥值。旧基线失败公司的 `result.json` 可能只有 `AnySearch found no trusted substantive company page` 而没有底层 metadata。不能单凭最终错误断定网络、认证或网页内容中的哪一层出错。保留失败批次，先用同一家输入对照两台环境；未经对齐不要人工改结果或用补跑结果替换原始基线。
 
 ### `AnySearch CLI unavailable`
 

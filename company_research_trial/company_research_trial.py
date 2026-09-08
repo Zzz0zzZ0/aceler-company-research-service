@@ -20,6 +20,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -76,6 +77,10 @@ INDUSTRIES = (
 
 class AnySearchPackError(RuntimeError):
     """A bounded AnySearch failure."""
+
+    def __init__(self, message: str, *, metadata: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.metadata = metadata or {}
 
 
 def resolved_validator() -> Path:
@@ -483,9 +488,10 @@ def _fallback_search_output(queries: list[str], max_results: int, timeout: int) 
 
 
 def _fallback_extract_output(url: str, timeout: int) -> str:
-    document = _fetch_dom_html(url, timeout=min(30, timeout))
+    errors: list[str] = []
+    document = _fetch_dom_html(url, timeout=min(30, timeout), errors=errors)
     if not document:
-        raise AnySearchPackError("Public extract fallback found no readable HTML")
+        raise AnySearchPackError("; ".join(errors) or "Public extract fallback found no readable HTML")
     parser = _DOMLinkParser()
     try:
         parser.feed(document)
@@ -785,20 +791,26 @@ class _DOMRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _fetch_dom_html(url: str, timeout: int = 10) -> str:
+def _fetch_dom_html(url: str, timeout: int = 10, *, errors: list[str] | None = None) -> str:
     """Fetch a bounded public HTML document for link discovery only."""
     host = urlparse(url).hostname or ""
     if not _public_dom_url(url, host):
+        if errors is not None:
+            errors.append("URL policy or DNS resolution rejected the target")
         return ""
     try:
         request = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; AcelerResearch/1.0)"})
         with build_opener(_DOMRedirectHandler(host)).open(request, timeout=timeout) as response:
             content_type = response.headers.get_content_type()
             if content_type not in {"text/html", "application/xhtml+xml"}:
+                if errors is not None:
+                    errors.append(f"Unsupported content type: {content_type}")
                 return ""
             charset = response.headers.get_content_charset() or "utf-8"
             return response.read(1_500_001)[:1_500_000].decode(charset, errors="replace")
-    except Exception:
+    except Exception as exc:
+        if errors is not None:
+            errors.append(_redact_sensitive(f"{type(exc).__name__}: {exc}")[:400])
         return ""
 
 
@@ -885,6 +897,11 @@ _NOISE_SIGNALS = (
     "protection-and-processing", "cookie", "contact", "news", "blog", "event",
 )
 _LOW_AUTHORITY_HOSTS = (
+    "facebook.com",
+    "instagram.com",
+    "youtube.com",
+    "twitter.com",
+    "x.com",
     "crunchbase.com",
     "dnb.com",
     "europages.co.uk",
@@ -1222,6 +1239,8 @@ def anysearch_pack(
     name = str(record.get("name") or "").strip()
     seed_url = _normalise_url(str(record.get("website") or ""))
     domain = hostname(seed_url)
+    if _low_authority_host(domain):
+        domain = ""  # A directory/social profile is an identity hint, not a company domain.
     if not name:
         raise AnySearchPackError("Input identity seed has no company name")
     max_sources = max(1, min(MAX_EVIDENCE_PAGES, int(max_sources)))
@@ -1278,6 +1297,7 @@ def anysearch_pack(
         "extract_calls": 0,
         "local_extract_calls": 0,
         "local_extracted_urls": [],
+        "extraction_attempts": [],
         "external_fallback": False,
         "cache_hit": False,
         "cache_path": str(cache_path) if cache_path else "",
@@ -1294,19 +1314,26 @@ def anysearch_pack(
         )
         metadata["local_extract_calls"] += int(outcome["local_calls"])
         metadata["extract_calls"] += int(outcome["anysearch_calls"])
+        metadata["extraction_attempts"].append({
+            "url": url,
+            "source": outcome["source"],
+            "local_calls": outcome["local_calls"],
+            "anysearch_calls": outcome["anysearch_calls"],
+            "errors": [_redact_sensitive(str(error)) for error in outcome["errors"]],
+        })
         if outcome["source"] == "local_http":
             metadata["local_extracted_urls"].append(str(outcome["url"]))
         return str(outcome["text"])
 
     started = time.monotonic()
     try:
+        metadata["search_calls"] += 1
         search_output = run_anysearch_cli(
             ["batch_search", *[part for query in queries for part in ("--query", query)], "--max_results", "5"],
             timeout=20,
         )
-        metadata["search_calls"] = 1
     except Exception as exc:
-        metadata["error"] = str(exc)
+        metadata["error"] = _redact_sensitive(str(exc))
         search_output = ""
     query_sections = _batch_query_sections(search_output, tuple(search_slots))
     slot_candidates = {
@@ -1372,11 +1399,11 @@ def anysearch_pack(
         ]
         metadata["supplemental_queries"] = supplemental_queries
         try:
+            metadata["search_calls"] += 1
             supplemental_output = run_anysearch_cli(
                 ["batch_search", "--query", supplemental_queries[0], "--query", supplemental_queries[1], "--max_results", "5"],
                 timeout=20,
             )
-            metadata["search_calls"] += 1
             metadata["supplemental_search"] = True
             search_output = "\n".join(part for part in (search_output, supplemental_output) if part)
             supplemental_urls = _rank_urls(_search_result_urls(supplemental_output), supplemental_output, name, domain)
@@ -1393,7 +1420,7 @@ def anysearch_pack(
                     pages.append((url, extracted.strip()))
                     metadata["extracted_urls"].append(url)
         except Exception as exc:
-            metadata["supplemental_error"] = str(exc)
+            metadata["supplemental_error"] = _redact_sensitive(str(exc))
     if not pages:
         metadata["external_fallback"] = True
         external_urls = _rank_urls(_ranked_company_urls(search_output, name), search_output, name)
@@ -1415,7 +1442,8 @@ def anysearch_pack(
     metadata["extract_budget_exhausted"] = metadata["extract_calls"] >= MAX_ANYSEARCH_EXTRACT_CALLS
     metadata["seconds"] = round(time.monotonic() - started, 1)
     if not pages:
-        raise AnySearchPackError("AnySearch found no trusted substantive company page")
+        metadata["failure_stage"] = "retrieval"
+        raise AnySearchPackError("AnySearch found no trusted substantive company page", metadata=metadata)
     sections = ["# AnySearch extracted identity-seeded sources"]
     for index, (url, text) in enumerate(pages, 1):
         sections.extend(["", f"## S{index}", f"URL: {url}", f"Title: {_extract_title(text, url)}", "", text])
@@ -1480,8 +1508,19 @@ def agentic_anysearch_pack(
     planner_error = ""
     entity_aliases: list[str] = []
     planned_official_urls: list[str] = []
+    diagnostics: dict[str, Any] = {"mode": "agentic", "failure_stage": "retrieval_recovery", "search_calls": 0,
+                                   "extract_calls": 0, "local_extract_calls": 0, "extraction_attempts": []}
+
+    def retrieval_failure(message: str) -> AnySearchPackError:
+        return AnySearchPackError(message, metadata={**diagnostics, "queries": queries})
+
+    def record_extraction(url: str, outcome: dict[str, Any]) -> None:
+        for key in ("extract_calls", "local_extract_calls"):
+            diagnostics[key] += int(outcome["anysearch_calls" if key == "extract_calls" else "local_calls"])
+        diagnostics["extraction_attempts"].append({"url": url, "source": outcome["source"], "errors": outcome["errors"]})
 
     def search(search_queries: list[str]) -> str:
+        diagnostics["search_calls"] += 1
         search_args = ["batch_search"]
         for query in search_queries:
             search_args.extend(("--query", query))
@@ -1567,7 +1606,7 @@ def agentic_anysearch_pack(
     candidates = _search_result_urls(search_output)
     candidate_keys = {_provenance_url_key(url): url for url in candidates if _provenance_url_key(url)}
     if not candidate_keys:
-        raise AnySearchPackError(
+        raise retrieval_failure(
             "No URL candidates remained after semantic planning"
             + (f"; live search failed: {search_error}" if search_error else "")
         )
@@ -1642,11 +1681,11 @@ def agentic_anysearch_pack(
         dict.fromkeys([*directory_identity_leads, *selected_candidates, *planned_official_urls])
     )[:8]
     if not selected_candidates:
-        raise AnySearchPackError("Hermes selected no URL from the AnySearch results")
+        raise retrieval_failure("Hermes selected no URL from the AnySearch results")
 
-    official_domain = hostname(_normalise_url(str(record.get("website") or ""))) or _discover_company_domain(
-        candidates, name
-    )
+    official_domain = hostname(_normalise_url(str(record.get("website") or "")))
+    if not official_domain or _low_authority_host(official_domain):
+        official_domain = _discover_company_domain(candidates, name)
     official_candidates = [url for url in candidates if official_domain and _trusted_url(url, official_domain)]
     reserved_official_url = next(iter(_rank_urls(official_candidates, search_output, name, official_domain)), "")
 
@@ -1742,6 +1781,7 @@ def agentic_anysearch_pack(
                 timeout=min(90, timeout),
                 use_anysearch=False,
             )
+            record_extraction(url, outcome)
             local_attempted_keys.add(key)
             local_extract_call_count += int(outcome["local_calls"])
             local_extract_errors[key] = [str(item) for item in outcome["errors"]]
@@ -1791,6 +1831,7 @@ def agentic_anysearch_pack(
                     use_anysearch=allow_anysearch,
                     max_anysearch_calls=MAX_ANYSEARCH_EXTRACT_CALLS - extract_call_count,
                 )
+                record_extraction(url, outcome)
                 local_extract_call_count += int(outcome["local_calls"])
                 extract_call_count += int(outcome["anysearch_calls"])
                 extracted_url = str(outcome["url"])
@@ -1850,7 +1891,7 @@ def agentic_anysearch_pack(
         official_domain and any(_trusted_url(url, official_domain) for url, _ in provisional_pages)
     )
     if not provisional_pages:
-        raise AnySearchPackError("Hermes-selected AnySearch pages had no substantive extract")
+        raise retrieval_failure("Hermes-selected AnySearch pages had no substantive extract")
 
     def check_gaps(pages: list[tuple[str, str]], suffix: str = "") -> dict[str, Any]:
         extracted_sections: list[str] = []
@@ -2023,7 +2064,7 @@ def agentic_anysearch_pack(
             official_domain = ""
             reserved_official_url = ""
             if not official_website_query and not gap_queries and not supplemental_queries:
-                raise AnySearchPackError("Semantic identity rejected the extracted pages without a repair query")
+                raise retrieval_failure("Semantic identity rejected the extracted pages without a repair query")
         discovery_queries = [official_website_query] if official_website_query and not official_domain else []
         if dom_selected_urls and not missing_evidence:
             supplemental_queries = []
@@ -2154,7 +2195,7 @@ def agentic_anysearch_pack(
         elif not selected_candidates and previous_selected_candidates and provisional_pages:
             selected_candidates = previous_selected_candidates
         elif not selected_candidates:
-            raise AnySearchPackError("Hermes selected no URL from the supplemental AnySearch results")
+            raise retrieval_failure("Hermes selected no URL from the supplemental AnySearch results")
         selected_candidates = reserve_dom(selected_candidates)
         if reserved_supplemental_url and reserved_supplemental_url not in selected_candidates:
             insert_at = 1 if selected_candidates and selected_candidates[0] == reserved_official_url else 0
@@ -2166,7 +2207,7 @@ def agentic_anysearch_pack(
     if not pages:
         pages = selected_snippet_pages(selected_candidates, max_sources)
     if not pages:
-        raise AnySearchPackError("Hermes-selected AnySearch pages had no substantive extract")
+        raise retrieval_failure("Hermes-selected AnySearch pages had no substantive extract")
     identity_unresolved_after_retry = False
     if supplemental_queries and isinstance(selection_json, dict) and selection_json.get("identity_status") == "ambiguous":
         final_gap_check = check_gaps(pages, "-final")
@@ -2181,11 +2222,12 @@ def agentic_anysearch_pack(
         official_domain and any(_trusted_url(url, official_domain) for url, _ in pages)
     )
     if record.get("website") and reserved_official_url and not official_candidate_extracted:
-        raise AnySearchPackError("Plausible official website candidate had no substantive extract")
+        raise retrieval_failure("Plausible official website candidate had no substantive extract")
 
     selected_urls = [url for url, _ in pages]
     metadata = {
         "mode": "agentic",
+        "extraction_attempts": diagnostics["extraction_attempts"],
         "queries": queries,
         "identity_status": (
             selection_json.get("identity_status")
@@ -2247,10 +2289,29 @@ def agentic_anysearch_pack(
     return "\n".join(sections).strip() + "\n", metadata
 
 
-def _retrieval_gap_reasons(metadata: dict[str, Any], evidence_pack: str = "") -> set[str]:
+def _retrieval_quality_reasons(metadata: dict[str, Any], evidence_pack: str = "") -> set[str]:
+    """Find source-quality gaps without deciding industrial relevance."""
     reasons: set[str] = set()
     if metadata.get("external_fallback") or metadata.get("search_snippet_fallback"):
         reasons.add("weak_source_mode")
+    urls = list(metadata.get("selected_urls") or [])
+    if urls and all(_low_authority_host(hostname(url)) for url in urls):
+        reasons.add("secondary_sources_only")
+        if all(urlparse(url).path.rstrip("/") in {"", "/login", "/signin"} for url in urls):
+            reasons.add("identity_unverified")
+    categories = {
+        str(category)
+        for page in metadata.get("selected_page_scores") or []
+        if isinstance(page, dict)
+        for category in page.get("categories") or []
+    }
+    if metadata.get("selected_page_scores") and not categories.intersection({"product", "process"}):
+        reasons.add("no_product_or_process_page")
+    return reasons
+
+
+def _retrieval_gap_reasons(metadata: dict[str, Any], evidence_pack: str = "") -> set[str]:
+    reasons = _retrieval_quality_reasons(metadata, evidence_pack)
     folded = _fold_text(evidence_pack)
     if re.search(r"water\s+treatment|wastewater|water-treatment", folded) and not re.search(
         r"poly\s+alumini?um\s+chloride|\bpacl?\b", folded
@@ -2277,14 +2338,6 @@ def _retrieval_gap_reasons(metadata: dict[str, Any], evidence_pack: str = "") ->
         folded,
     ) and re.search(r"refractor|ceramic|abrasive|foundr|steel", folded) and not catalog_material:
         reasons.add("target_industry_supplier_without_portfolio")
-    categories = {
-        str(category)
-        for page in metadata.get("selected_page_scores") or []
-        if isinstance(page, dict)
-        for category in page.get("categories") or []
-    }
-    if metadata.get("selected_page_scores") and not categories.intersection({"product", "process"}):
-        reasons.add("no_product_or_process_page")
     return reasons
 
 
@@ -2302,6 +2355,7 @@ def recall_first_anysearch_pack(
     max_sources: int = MAX_EVIDENCE_PAGES,
     cache_dir: Path | None = None,
     refresh_cache: bool = False,
+    quality_only: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """Run one bounded agentic recovery when deterministic retrieval fails or is visibly weak."""
     if not record.get("website"):
@@ -2321,6 +2375,7 @@ def recall_first_anysearch_pack(
     primary_meta: dict[str, Any] = {}
     primary_error = ""
     primary_gaps: set[str] = set()
+    gap_check = _retrieval_quality_reasons if quality_only else _retrieval_gap_reasons
     try:
         primary_pack, primary_meta = anysearch_pack(
             record,
@@ -2328,11 +2383,12 @@ def recall_first_anysearch_pack(
             cache_dir=cache_dir,
             refresh_cache=refresh_cache,
         )
-        primary_gaps = _retrieval_gap_reasons(primary_meta, primary_pack)
+        primary_gaps = gap_check(primary_meta, primary_pack)
         if not primary_gaps:
             return primary_pack, primary_meta
     except Exception as exc:
-        primary_error = str(exc)
+        primary_error = _redact_sensitive(str(exc))
+        primary_meta = dict(getattr(exc, "metadata", {}))
 
     try:
         recovered_pack, recovered_meta = agentic_anysearch_pack(
@@ -2344,19 +2400,32 @@ def recall_first_anysearch_pack(
             max_sources=max_sources,
         )
     except Exception as exc:
+        recovery_meta = dict(getattr(exc, "metadata", {}))
+        failure_meta = dict(primary_meta)
+        for key in ("search_calls", "extract_calls", "local_extract_calls"):
+            failure_meta[key] = int(primary_meta.get(key) or 0) + int(recovery_meta.get(key) or 0)
+        failure_meta["recall_recovery"] = {
+            "attempted": True, "accepted": False, "error": _redact_sensitive(str(exc)),
+            "primary_gaps": sorted(primary_gaps), "diagnostics": recovery_meta,
+        }
         identity_rejected = "selected no URL" in str(exc) or "Semantic identity rejected" in str(exc)
         if not primary_pack or identity_rejected or "identity_unverified" in primary_gaps:
             raise AnySearchPackError(
-                f"Primary retrieval failed ({primary_error}); recall recovery failed ({exc})"
+                f"Primary retrieval failed ({primary_error}); recall recovery failed ({_redact_sensitive(str(exc))})",
+                metadata=failure_meta,
             ) from exc
-        primary_meta["recall_recovery"] = {
-            "attempted": True,
-            "accepted": False,
-            "error": str(exc),
-        }
-        return primary_pack, primary_meta
+        return primary_pack, failure_meta
 
-    recovered_gaps = _retrieval_gap_reasons(recovered_meta, recovered_pack)
+    recovered_gaps = gap_check(recovered_meta, recovered_pack)
+    if "identity_unverified" in recovered_gaps:
+        failure_meta = dict(recovered_meta)
+        for key in ("search_calls", "extract_calls", "local_extract_calls"):
+            failure_meta[key] = int(primary_meta.get(key) or 0) + int(recovered_meta.get(key) or 0)
+        failure_meta["recall_recovery"] = {
+            "attempted": True, "accepted": False, "primary_diagnostics": primary_meta,
+            "primary_gaps": sorted(primary_gaps), "recovered_gaps": sorted(recovered_gaps),
+        }
+        raise AnySearchPackError("Recovery still returned an unverified platform root", metadata=failure_meta)
     if primary_pack and primary_gaps.issubset(recovered_gaps):
         primary_meta["recall_recovery"] = {
             "attempted": True,
@@ -2364,7 +2433,10 @@ def recall_first_anysearch_pack(
             "primary_gaps": sorted(primary_gaps),
             "recovered_gaps": sorted(recovered_gaps),
             "error": "Recovery did not close a detected evidence gap",
+            "diagnostics": recovered_meta,
         }
+        for key in ("search_calls", "extract_calls", "local_extract_calls"):
+            primary_meta[key] = int(primary_meta.get(key) or 0) + int(recovered_meta.get(key) or 0)
         return primary_pack, primary_meta
 
     metadata = dict(recovered_meta)
@@ -2375,6 +2447,8 @@ def recall_first_anysearch_pack(
             + int(recovered_meta.get("search_calls") or 0),
             "extract_calls": int(primary_meta.get("extract_calls") or 0)
             + int(recovered_meta.get("extract_calls") or 0),
+            "local_extract_calls": int(primary_meta.get("local_extract_calls") or 0)
+            + int(recovered_meta.get("local_extract_calls") or 0),
             "recall_recovery": {
                 "attempted": True,
                 "accepted": True,
@@ -2383,6 +2457,7 @@ def recall_first_anysearch_pack(
                 "primary_selected_urls": list(primary_meta.get("selected_urls") or []),
                 "primary_gaps": sorted(primary_gaps),
                 "recovered_gaps": sorted(recovered_gaps),
+                "primary_diagnostics": primary_meta,
             },
         }
     )
@@ -2736,6 +2811,14 @@ def _redact_sensitive(text: str) -> str:
         if value:
             text = text.replace(value, "[redacted]")
     return re.sub(r"(?i)(api[_-]?key|access[_-]?token|secret)\s*[:=]\s*[^\s,;]+", r"\1=[redacted]", text)
+
+
+def _redact_diagnostics(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _redact_diagnostics(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_diagnostics(item) for item in value]
+    return _redact_sensitive(value) if isinstance(value, str) else value
 
 
 def _invoke_hermes(
@@ -3511,23 +3594,32 @@ def research_one(
     errors: list[str] = []
     if evidence_pack is None and use_anysearch:
         try:
-            if refresh_evidence_cache:
-                evidence_pack, search_meta = recall_first_anysearch_pack(
-                    record,
-                    record_dir,
-                    hermes=hermes,
-                    timeout=timeout,
-                    reasoning=reasoning,
-                    cache_dir=ANYSEARCH_CACHE_DIR,
-                    refresh_cache=True,
-                )
-            else:
-                evidence_pack, search_meta = anysearch_pack(record, cache_dir=ANYSEARCH_CACHE_DIR)
+            evidence_pack, search_meta = recall_first_anysearch_pack(
+                record,
+                record_dir,
+                hermes=hermes,
+                timeout=timeout,
+                reasoning=reasoning,
+                cache_dir=ANYSEARCH_CACHE_DIR,
+                refresh_cache=refresh_evidence_cache,
+                quality_only=not refresh_evidence_cache,
+            )
             (record_dir / "anysearch-evidence.md").write_text(evidence_pack, encoding="utf-8")
-            (record_dir / "anysearch-meta.json").write_text(json.dumps(search_meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         except Exception as exc:
-            errors.append(str(exc))
+            errors.append(_redact_sensitive(str(exc)))
+            search_meta.update(getattr(exc, "metadata", {}))
+            search_meta["failure_stage"] = "retrieval"
+            search_meta["error"] = errors[-1]
             evidence_pack = ""
+        search_meta["runtime"] = {
+            "project_dir": str(PROJECT_DIR), "python": sys.executable, "node": shutil.which("node"),
+            "anysearch_cli": str(ANYSEARCH_CLI),
+            "model": os.getenv("ACELER_HERMES_MODEL", DEFAULT_HERMES_MODEL),
+            "provider": os.getenv("ACELER_HERMES_PROVIDER", DEFAULT_HERMES_PROVIDER),
+            "service_key_present": bool(os.getenv("ANYSEARCH_API_KEY")),
+        }
+        search_meta = _redact_diagnostics(search_meta)
+        (record_dir / "anysearch-meta.json").write_text(json.dumps(search_meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     elif evidence_pack:
         (record_dir / "anysearch-evidence.md").write_text(evidence_pack, encoding="utf-8")
     if not evidence_pack.strip() or not _pack_urls(evidence_pack):

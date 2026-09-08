@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 from company_research_trial.company_research_trial import (
     ANYSEARCH_CLI,
+    AnySearchPackError,
     DEFAULT_HERMES,
     DEFAULT_TOOLSETS,
     PROJECT_DIR,
@@ -45,6 +46,7 @@ from company_research_trial.company_research_trial import (
     _discover_dom_candidates,
     _extract_page_candidates,
     _fallback_extract_output,
+    _fetch_dom_html,
     _public_dom_url,
     _run_id,
     _select_relevant_pages,
@@ -2270,11 +2272,67 @@ RAW_PAGE_BODY_MUST_NOT_REACH_DECISION_AGENTS
         self.assertEqual(mocked.call_args_list[1].kwargs["raw_path"].name, "hermes-raw-attempt-2.txt")
 
     def test_anysearch_failure_fails_before_hermes(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch("company_research_trial.company_research_trial.anysearch_pack", side_effect=RuntimeError("no trusted page")), patch("company_research_trial.company_research_trial._invoke_hermes") as mocked:
+        with tempfile.TemporaryDirectory() as directory, patch("company_research_trial.company_research_trial.anysearch_pack", side_effect=RuntimeError("no trusted page")), patch("company_research_trial.company_research_trial.agentic_anysearch_pack", side_effect=RuntimeError("no recovered page")), patch("company_research_trial.company_research_trial._invoke_hermes") as mocked:
             item = research_one(record(), 1, Path(directory), hermes=Path("/bin/true"))
         mocked.assert_not_called()
         self.assertEqual(item["status"], "failed")
         self.assertIn("Hermes was not called", " ".join(item["errors"]))
+
+    def test_failed_retrieval_preserves_diagnostics_and_redacts_key(self) -> None:
+        error = AnySearchPackError("no trusted page")
+        error.metadata = {"search_calls": 2, "extract_calls": 1, "extract_errors": ["401 diagnostic-secret-key"]}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"ANYSEARCH_API_KEY": "diagnostic-secret-key"}), patch(
+            "company_research_trial.company_research_trial.anysearch_pack", side_effect=error
+        ), patch("company_research_trial.company_research_trial.agentic_anysearch_pack", side_effect=RuntimeError("recovery unavailable")):
+            item = research_one(record(), 1, Path(directory), hermes=Path("/bin/true"))
+            path = Path(item["record_dir"]) / "anysearch-meta.json"
+            self.assertTrue(path.is_file())
+            metadata = json.loads(path.read_text())
+            self.assertEqual(metadata["search_calls"], 2)
+            self.assertEqual(metadata["extract_calls"], 1)
+            self.assertNotIn("diagnostic-secret-key", path.read_text())
+            self.assertEqual(metadata, item["anysearch"])
+
+    def test_default_retrieval_recovers_platform_root_before_scoring(self) -> None:
+        weak = ("# Sources\n\n## S1\nURL: https://www.facebook.com\nTitle: Facebook\n\n" + "Log in or sign up. " * 10, {"selected_urls": ["https://www.facebook.com"], "search_calls": 1})
+        recovered = (EVIDENCE, {"selected_urls": ["https://example.test/process"], "search_calls": 1, "identity_status": "confirmed"})
+        invocation = {"assessment": assessment(), "errors": [], "raw": "valid", "usage": None, "attempt": {}, "seconds": 0.1}
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "company_research_trial.company_research_trial.anysearch_pack", return_value=weak
+        ), patch("company_research_trial.company_research_trial.agentic_anysearch_pack", return_value=recovered) as recovery, patch(
+            "company_research_trial.company_research_trial._invoke_hermes", return_value=invocation
+        ) as lead:
+            item = research_one(record(), 1, Path(directory), hermes=Path("/bin/true"))
+        self.assertEqual(recovery.call_count, 1)
+        self.assertEqual(item["status"], "valid")
+        self.assertNotIn("Log in or sign up", lead.call_args.kwargs["prompt"])
+
+    def test_platform_root_is_not_restored_after_recovery_failure(self) -> None:
+        weak = ("# Sources\n\n## S1\nURL: https://www.facebook.com\nTitle: Facebook\n\n" + "Log in or sign up. " * 10, {"selected_urls": ["https://www.facebook.com"]})
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "company_research_trial.company_research_trial.anysearch_pack", return_value=weak
+        ), patch("company_research_trial.company_research_trial.agentic_anysearch_pack", side_effect=RuntimeError("network unavailable")), patch(
+            "company_research_trial.company_research_trial._invoke_hermes"
+        ) as lead:
+            item = research_one(record(), 1, Path(directory), hermes=Path("/bin/true"))
+        self.assertEqual(item["status"], "failed")
+        lead.assert_not_called()
+
+    def test_quality_path_keeps_substantive_primary_without_business_expansion(self) -> None:
+        primary = (EVIDENCE + "\nWater treatment chemicals.", {"selected_urls": ["https://example.test/process"], "selected_page_scores": [{"categories": ["product", "process"]}]})
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "company_research_trial.company_research_trial.anysearch_pack", return_value=primary
+        ), patch("company_research_trial.company_research_trial.agentic_anysearch_pack") as recovery:
+            result = recall_first_anysearch_pack(record(), Path(directory), quality_only=True)
+        recovery.assert_not_called()
+        self.assertEqual(result, primary)
+
+    def test_local_fetch_failure_retains_original_error_type(self) -> None:
+        with patch("company_research_trial.company_research_trial._public_dom_url", return_value=True), patch(
+            "company_research_trial.company_research_trial.build_opener", side_effect=TimeoutError("connection timeout")
+        ), patch("company_research_trial.company_research_trial._fetch_dom_html", wraps=_fetch_dom_html):
+            with self.assertRaisesRegex(AnySearchPackError, "TimeoutError: connection timeout"):
+                _fallback_extract_output("https://development.test", 1)
 
     def test_refresh_path_uses_recall_first_retrieval(self) -> None:
         invocation = {"assessment": assessment(), "errors": [], "raw": "valid", "usage": None, "attempt": {}, "seconds": 0.1}

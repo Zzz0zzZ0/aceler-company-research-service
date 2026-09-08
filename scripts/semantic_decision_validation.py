@@ -28,18 +28,22 @@ OUTPUT_ROOT = ROOT / "outputs" / "semantic-decision-validation"
 
 
 def crm_markdown_dataset(path: Path) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
-    """Read identity seeds and human labels from the eight-column CRM table."""
+    """Read seven/eight-column CRM tables, preserving Markdown link targets."""
     records: list[dict[str, Any]] = []
     labels: dict[int, dict[str, Any]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if not re.match(r"^\|\s*\d+\s*\|", line):
             continue
-        columns = [value.strip().replace("**", "") for value in line.replace("\\|", "__PIPE__").strip().strip("|").split("|")]
+        row = line.replace("\\|", "__PIPE__").strip()[1:]
+        if row.endswith("|"):
+            row = row[:-1]
+        columns = [value.strip().replace("**", "") for value in row.split("|")]
         columns = [value.replace("__PIPE__", "|") for value in columns]
-        if len(columns) != 8:
-            raise ValueError(f"CRM row must contain eight columns: {line[:120]}")
+        if len(columns) not in {7, 8}:
+            raise ValueError(f"CRM row must contain seven or eight columns: {line[:120]}")
         index = int(columns[0])
-        url = re.search(r"https?://[^\s)]+", columns[5])
+        target = re.fullmatch(r"\[[^\]]*\]\(<?(https?://[^\s<>]+)>?\)", columns[5])
+        url = re.search(r"https?://[^\s<>]+", target.group(1) if target else columns[5])
         record = {"id": f"crm-{index:03d}", "name": columns[4], "country": columns[6]}
         if url:
             record["website"] = url.group(0)
@@ -82,7 +86,7 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=5)
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--tag", default="multi-agent-v2")
-    parser.add_argument("--crm-markdown", type=Path, help="Run live research from an eight-column CRM Markdown test set")
+    parser.add_argument("--crm-markdown", type=Path, help="Run live research from a seven/eight-column CRM Markdown test set")
     parser.add_argument("--refresh-evidence-cache", action="store_true")
     parser.add_argument("--resume-run-dir", type=Path, help="Reuse valid results and rerun only failed or missing companies")
     args = parser.parse_args()
@@ -177,6 +181,7 @@ def main() -> int:
                 "follow_up": match.get("follow_up"),
                 "selected_role": research.get("selected_role"),
                 "agent_calls": research.get("agent_call_count", 0),
+                "retrieval_agent_calls": len(list((run_dir / "records" / f"{index:03d}-{record['id']}").glob("agentic-*-raw.txt"))),
                 "role_call_counts": research.get("role_call_counts", {}),
                 "router_products": (research.get("catalog_router") or {}).get("products", []),
                 "prompt_chars": sizes,
@@ -231,6 +236,7 @@ def main() -> int:
         },
         "valid": sum(row["status"] == "valid" for row in rows),
         "agent_calls": sum(int(row["agent_calls"] or 0) for row in rows),
+        "retrieval_agent_calls": sum(row["retrieval_agent_calls"] for row in rows),
         "recall_triggered": sum((results[i].get("research") or {}).get("zero_score_review", {}).get("triggered") is True for i in results),
         "recall_selected": sum(row["selected_role"] == "recall" for row in rows),
         "prompt_chars": prompt_summary,
@@ -248,7 +254,7 @@ def main() -> int:
         f"- 样本：{len(records)} 家；并发：{args.workers}；AnySearch：{anysearch_calls} 次\n"
         f"- 召回率：{recall:.2%}；精确率：{precision:.2%}\n"
         f"- TP/FP/TN/FN：{tp}/{fp}/{tn}/{fn}；不可评分：{counts['unscorable_positive'] + counts['unscorable_negative']}\n"
-        f"- Agent 调用：{summary['agent_calls']}；墙钟时间：{summary['wall_seconds']} 秒\n"
+        f"- 决策 Agent 调用：{summary['agent_calls']}；检索 Agent 调用：{summary['retrieval_agent_calls']}；墙钟时间：{summary['wall_seconds']} 秒\n"
         f"- Prompt 字符统计：`{json.dumps(prompt_summary, ensure_ascii=False)}`\n"
     )
     (run_dir / "验证报告.md").write_text(report, encoding="utf-8")
