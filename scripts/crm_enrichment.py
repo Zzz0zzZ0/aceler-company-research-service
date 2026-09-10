@@ -24,7 +24,7 @@ from psycopg import sql
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from company_research_trial.company_research_trial import (
-    DEFAULT_ENV_FILE, DEFAULT_HERMES, AnySearchQuotaExhausted, _invoke_hermes, _redact_sensitive,
+    DEFAULT_ENV_FILE, DEFAULT_HERMES, ANYSEARCH_REQUEST_METER, AnySearchQuotaExhausted, _invoke_hermes, _redact_sensitive,
     crm_connection, evidence_links, load_env_file, localize_item, render_assessment, research_one,
 )
 from company_research_trial.dashboard import (
@@ -147,6 +147,23 @@ def updates(row, decision, background, score):
     return {key: value for key, value in result.items() if row[key] != value}
 
 
+def measured_research(seed, index, run):
+    """Observe the unchanged research path; count query attempts, including failures."""
+    directory = run / "records" / f"{index:03d}-{seed['id']}"
+    meter_path = directory / "request-usage.json"
+    meter = read(meter_path) if meter_path.exists() else {
+        "search_requests": 0, "extract_requests": 0, "cli_attempts": 0, "billing_units": "unknown"}
+    token = ANYSEARCH_REQUEST_METER.set(meter)
+    try:
+        item = research_one(seed, index, run)
+        item["request_usage"] = meter
+        save(directory / "result.json", item)
+        return item
+    finally:
+        save(meter_path, meter)
+        ANYSEARCH_REQUEST_METER.reset(token)
+
+
 def prepare(row, index, run, manifest):
     directory = run / "records" / f"{index:03d}-{row['id']}"
     proposal_path = directory / "proposal.json"
@@ -160,7 +177,7 @@ def prepare(row, index, run, manifest):
     if item and item.get("status") != "valid":
         save(directory / "previous-failures" / (str(time.time_ns()) + ".json"), item)
         item = None
-    item = item or research_one(seed, index, run)
+    item = item or measured_research(seed, index, run)
     if item.get("status") != "valid":
         proposal = {"status": "failed", "reason": "Research did not complete", "errors": item.get("errors", [])}
     elif (item.get("assessment") or {}).get("identity_status") != "confirmed":
@@ -455,6 +472,8 @@ def status(run, *, emit=True):
         "progress": progress, "log": str(run / "worker.log")}
     if (run / "quota-alert.json").is_file():
         result["alert"] = read(run / "quota-alert.json")
+    if (run / "optimization-review.json").is_file():
+        result["optimization_review"] = read(run / "optimization-review.json")
     if emit:
         print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return result

@@ -27,6 +27,21 @@ def proposal(changes):
 
 
 class EnrichmentTests(unittest.TestCase):
+    def test_meter_counts_individual_queries_and_retains_failed_attempts_on_resume(self):
+        def simulated_research(seed, index, run):
+            C.run_anysearch_cli(["batch_search", "--query", "identity", "--query", "products"])
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "research_one", side_effect=simulated_research):
+            run = Path(temporary)
+            with patch.object(C.subprocess, "run", side_effect=TimeoutError("network timeout")):
+                for _ in range(2):
+                    with self.assertRaises(TimeoutError):
+                        M.measured_research(ROW, 1, run)
+                    self.assertIsNone(C.ANYSEARCH_REQUEST_METER.get())
+            meter = M.read(run / "records" / f"001-{ROW['id']}" / "request-usage.json")
+            self.assertEqual(meter["search_requests"], 4)
+            self.assertEqual(meter["cli_attempts"], 2)
+            self.assertEqual(meter["extract_requests"], 0)
+
     def test_key_interface_blocks_cross_origin_and_never_echoes_key(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(M, "target", return_value="test-db"):
             run = Path(temporary); M.save(run / "manifest.json", {"target": "test-db"})
