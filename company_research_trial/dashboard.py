@@ -579,8 +579,10 @@ def _write_anysearch_key(env_file: Path, api_key: str) -> None:
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=env_file.parent, prefix=f".{env_file.name}.", delete=False
         ) as handle:
-            handle.write("\n".join(updated).rstrip("\n") + "\n")
             temporary = Path(handle.name)
+            handle.write("\n".join(updated).rstrip("\n") + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.chmod(temporary, mode)
         temporary.replace(env_file)
     finally:

@@ -8,6 +8,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+from http import HTTPStatus
+from http.server import HTTPServer
 import json
 import os
 from pathlib import Path
@@ -24,6 +26,10 @@ sys.path.insert(0, str(ROOT))
 from company_research_trial.company_research_trial import (
     DEFAULT_ENV_FILE, DEFAULT_HERMES, AnySearchQuotaExhausted, _invoke_hermes, _redact_sensitive,
     crm_connection, evidence_links, load_env_file, localize_item, render_assessment, research_one,
+)
+from company_research_trial.dashboard import (
+    DashboardHandler, _MAX_SETTINGS_BODY, _ResearchInputError, _parse_anysearch_key,
+    _read_anysearch_key, _read_json_payload, _write_anysearch_key,
 )
 
 FIELDS = ("background", "industry", "rating")
@@ -436,7 +442,7 @@ def locked(run):
         return False
 
 
-def status(run):
+def status(run, *, emit=True):
     state = read(run / "worker.json") if (run / "worker.json").is_file() else {}
     progress = read(run / "progress.json") if (run / "progress.json").is_file() else {}
     running = locked(run)
@@ -449,15 +455,22 @@ def status(run):
         "progress": progress, "log": str(run / "worker.log")}
     if (run / "quota-alert.json").is_file():
         result["alert"] = read(run / "quota-alert.json")
-    print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+    if emit:
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return result
 
 
-def start(run, settings):
+def start(run, settings, *, anysearch_key=None):
     with (run / "control.lock").open("a") as control:
         fcntl.flock(control, fcntl.LOCK_EX)
         if locked(run):
+            if anysearch_key is not None:
+                raise ValueError("任务仍在运行，请先执行 stop 并等待退出后更换 Key")
             return status(run)
+        if anysearch_key is not None:
+            anysearch_key = _parse_anysearch_key({"api_key": anysearch_key})
+            _write_anysearch_key(DEFAULT_ENV_FILE, anysearch_key)
+            save(run / "key-update.json", {"at": now(), "saved": True})
         if (run / "quota-alert.json").is_file():
             save(run / "alerts" / (str(time.time_ns()) + ".json"), read(run / "quota-alert.json"))
             (run / "quota-alert.json").unlink()
@@ -486,9 +499,70 @@ def start(run, settings):
         return status(run)
 
 
+KEY_UI_HTML = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>CRM 背调 · 更换 Key</title>
+<style>body{font:16px/1.65 -apple-system,BlinkMacSystemFont,sans-serif;background:#f4f6f8;color:#17232e;margin:0;padding:40px 20px}main{max-width:620px;margin:auto;background:white;padding:32px;border-radius:16px}h1{font-size:25px}input,button{font:inherit;box-sizing:border-box;width:100%;padding:12px;border:1px solid #b6c2cb;border-radius:8px}button{margin-top:14px;background:#174e70;color:white;cursor:pointer}button:disabled{opacity:.5}pre{white-space:pre-wrap;background:#f4f6f8;padding:16px;border-radius:8px}small{color:#536572}#message{min-height:30px}</style>
+<main><h1>更换 AnySearch Key 并续跑</h1><p>保存新 Key 后，自动从现有检查点继续 CRM 背调。</p>
+<form id="form"><label for="key">新的 AnySearch API Key</label><input id="key" type="password" required minlength="8" maxlength="512" autocomplete="new-password" spellcheck="false"><button id="submit">保存 Key 并续跑</button></form>
+<p id="message" role="status"></p><small>Key 仅保存在本机配置中，不回显。正在运行时请先停止任务，再更换 Key。</small>
+<h2>当前进度</h2><pre id="progress">读取中…</pre></main>
+<script>
+const form=document.getElementById('form'),key=document.getElementById('key'),button=document.getElementById('submit'),message=document.getElementById('message');
+const labels={applied:'已补充信息',deleted_low_fit:'低相关度已软删除',already_deleted_low_fit:'已确认此前删除',review:'待复核',failed:'技术失败',deletion_scope_changed:'删除前范围变化',quota_exhausted:'额度耗尽中断'};
+async function refresh(){try{const r=await fetch('/status');const s=await r.json(),p=s.progress||{};document.getElementById('progress').textContent=[`状态：${s.running?'后台运行中':s.state==='paused'?'已暂停':s.state}`,`本轮已处理：${p.completed||0} / ${p.total||0}`,...Object.entries(p.counts||{}).map(([k,v])=>`${labels[k]||k}：${v}`),s.alert?.message||''].filter(Boolean).join('\n')}catch{document.getElementById('progress').textContent='本机接口暂时不可用，请重新运行 key-ui 命令。'}}
+form.addEventListener('submit',async e=>{e.preventDefault();button.disabled=true;message.textContent='正在保存并启动…';const payload=JSON.stringify({api_key:key.value});key.value='';try{const r=await fetch('/key-and-resume',{method:'POST',headers:{'Content-Type':'application/json'},body:payload});const s=await r.json();message.textContent=r.ok?(s.running?'Key 已保存，后台队列已启动。':'Key 已保存，请查看下方任务状态。'):(s.message||'操作失败，请查看本机日志。');await refresh()}catch{message.textContent='接口响应中断，请先查看状态，确认是否已启动。'}finally{button.disabled=false}});
+refresh();setInterval(refresh,5000);
+</script></html>'''
+
+
+def key_ui_server(run, settings):
+    class KeyHandler(DashboardHandler):
+        def allowed(self, post=False):
+            expected = f"127.0.0.1:{self.server.server_port}"
+            return (self.headers.get("Host") == expected and self._local_settings_request()
+                    and (not post or self.headers.get("Origin") == "http://" + expected))
+
+        def do_GET(self):
+            if not self.allowed():
+                self._json(HTTPStatus.FORBIDDEN, {"message": "仅允许从本机页面访问"})
+            elif self.path == "/":
+                self._send(HTTPStatus.OK, KEY_UI_HTML.encode(), "text/html; charset=utf-8")
+            elif self.path == "/status":
+                self._json(HTTPStatus.OK, status(run, emit=False))
+            else:
+                self._json(HTTPStatus.NOT_FOUND, {"message": "未找到接口"})
+
+        def do_POST(self):
+            if not self.allowed(post=True) or self.path != "/key-and-resume":
+                self._json(HTTPStatus.FORBIDDEN, {"message": "仅允许从本机页面提交"})
+                return
+            try:
+                key = _parse_anysearch_key(_read_json_payload(self, _MAX_SETTINGS_BODY))
+                if read(run / "manifest.json")["target"] != target():
+                    raise ValueError("CRM 目标发生变化，未更换 Key 或启动任务")
+                current_settings = read(run / "settings.json") if (run / "settings.json").is_file() else settings
+                result = start(run, current_settings, anysearch_key=key)
+            except _ResearchInputError as exc:
+                self._json(exc.status, {"message": exc.message})
+            except ValueError as exc:
+                self._json(HTTPStatus.CONFLICT, {"message": str(exc)})
+            except Exception:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"message": "保存或启动未完成，请查看任务状态与本机日志；若 Key 已保存，可执行 resume。"})
+            else:
+                self._json(HTTPStatus.OK, result)
+
+        def do_HEAD(self):
+            self._send(HTTPStatus.METHOD_NOT_ALLOWED, b"", "text/plain")
+
+        def log_message(self, format, *args):
+            pass  # Never log request bodies or credentials.
+
+    return HTTPServer(("127.0.0.1", 0), KeyHandler)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("snapshot", "run", "apply", "start", "resume", "stop", "status"))
+    parser.add_argument("command", choices=("snapshot", "run", "apply", "start", "resume", "stop", "status", "key-ui"))
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--crm-env", type=Path)
     parser.add_argument("--workers", type=int)
@@ -523,7 +597,24 @@ def main():
         parser.error("workers must be 1..5 and limit must be nonnegative")
     load_env_file(DEFAULT_ENV_FILE)
     load_env_file(Path(settings["crm_env"]))
+    # A newly saved local key takes precedence over an inherited stale shell value.
+    configured_key = _read_anysearch_key(DEFAULT_ENV_FILE)
+    if configured_key:
+        os.environ["ANYSEARCH_API_KEY"] = configured_key
     os.environ["ANYSEARCH_STOP_ON_QUOTA"] = "1"
+    if args.command == "key-ui":
+        with (args.run_dir / "key-ui.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(json.dumps(read(args.run_dir / "key-ui.json")), flush=True)
+                return
+            with key_ui_server(args.run_dir, settings) as server:
+                info = {"url": f"http://127.0.0.1:{server.server_port}/", "pid": os.getpid(), "started_at": now()}
+                save(args.run_dir / "key-ui.json", info)
+                print(json.dumps(info), flush=True)
+                server.serve_forever()
+        return
     if args.command in {"start", "resume"}:
         manifest = read(args.run_dir / "manifest.json")
         if manifest["target"] != target():

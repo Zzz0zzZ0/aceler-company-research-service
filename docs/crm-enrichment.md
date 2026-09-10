@@ -49,6 +49,14 @@ scripts/crm-enrichment resume
 
 后台进程与终端/Codex 会话分离，日志写入 `worker.log`。macOS 使用系统 `caffeinate -i -w PID` 避免运行时自动空闲睡眠；关机、合盖睡眠或断电仍会中断工作，恢复后执行 `resume`，不声称关机期间仍能运行。没有安装开机自启服务。
 
+## 更换 AnySearch Key 并续跑
+
+额度耗尽暂停后，执行 `scripts/crm-enrichment key-ui`，打开命令输出的本机网址。输入框隐藏密钥，点击“保存 Key 并续跑”后自动从当前检查点恢复，范围、并发和写入模式沿用本批设置。页面同时显示进度。任务正在运行时拒绝换 Key，请先 `stop` 并等待退出。
+
+本机页面仅监听 `127.0.0.1`，校验 Host/Origin；密钥经请求体提交，不进入 URL 或日志。复用仓库既有配置写入逻辑，将 Key 原子保存到 `config/local.env`，保留其他配置、限制文件权限，并让新进程使用新 Key。`key-update.json` 仅记录保存时间，不保存密钥。配置提交不等于验证额度，新 Key 无额度时仍会自动暂停。
+
+Key 页面网址和进程号保存在批次的 `key-ui.json`；同一批次重复执行命令返回已有页面。若在终端前台启动页面，关闭该终端只会停止输入页面，已启动的背调 worker 独立运行。
+
 ## 检查点和重复写保护
 
 每家公司目录下保存 `result.json`、翻译结果、`proposal.json`、`write-intent.json`、`apply.json` 和引用证据。文件用临时文件、fsync 和原子替换落盘。

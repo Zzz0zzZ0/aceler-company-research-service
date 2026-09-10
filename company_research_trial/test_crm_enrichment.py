@@ -2,8 +2,11 @@
 import copy
 import fcntl
 import importlib.util
+import http.client
+import json
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
@@ -24,6 +27,50 @@ def proposal(changes):
 
 
 class EnrichmentTests(unittest.TestCase):
+    def test_key_interface_blocks_cross_origin_and_never_echoes_key(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "target", return_value="test-db"):
+            run = Path(temporary); M.save(run / "manifest.json", {"target": "test-db"})
+            with M.key_ui_server(run, {}) as server:
+                thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+                base = f"http://127.0.0.1:{server.server_port}"
+                def request(origin, payload):
+                    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                    connection.request("POST", "/key-and-resume", json.dumps(payload), {"Content-Type": "application/json", "Origin": origin})
+                    response = connection.getresponse(); result = (response.status, response.read().decode()); connection.close(); return result
+                try:
+                    with patch.object(M, "start", return_value={"running": True}) as start:
+                        self.assertEqual(request("https://untrusted.test", {"api_key": "test-key-value"})[0], 403)
+                        start.assert_not_called()
+                        self.assertEqual(request(base, {"api_key": "bad"})[0], 400)
+                        start.assert_not_called()
+                        code, body = request(base, {"api_key": "test-key-value"})
+                        self.assertEqual(code, 200); self.assertNotIn("test-key-value", body)
+                        start.assert_called_once_with(run, {}, anysearch_key="test-key-value")
+                finally:
+                    server.shutdown(); thread.join()
+
+    def test_new_key_is_persisted_and_used_for_restart_without_secret_audit(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(M.os.environ, {"ANYSEARCH_API_KEY": "old-test-key"}):
+            run = Path(temporary); env = run / "test.env"; env.write_text("ANYSEARCH_API_KEY=old-test-key\nOTHER=preserved\n")
+            settings = {"crm_env": "/test/crm.env", "workers": 5, "limit": 0, "apply": True}
+            process = MagicMock(); process.poll.return_value = 0
+            seen_keys = []
+            def launch(*args, **kwargs):
+                seen_keys.append(M.os.environ["ANYSEARCH_API_KEY"])
+                self.assertNotIn("new-test-key", str(args))
+                return process
+            with patch.object(M, "DEFAULT_ENV_FILE", env), patch.object(M.subprocess, "Popen", side_effect=launch):
+                M.start(run, settings, anysearch_key="new-test-key")
+            self.assertEqual(M._read_anysearch_key(env), "new-test-key")
+            self.assertIn("OTHER=preserved", env.read_text())
+            self.assertEqual(env.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(seen_keys, ["new-test-key"])
+            self.assertNotIn("new-test-key", (run / "key-update.json").read_text())
+            with patch.object(M, "locked", return_value=True), patch.object(M, "_write_anysearch_key") as write:
+                with self.assertRaises(ValueError):
+                    M.start(run, settings, anysearch_key="another-test-key")
+                write.assert_not_called()
+
     def low_item(self, score=0):
         return {"status": "valid", "record": ROW.copy(), "assessment": {"identity_status": "confirmed"},
                 "validation": {"valid": True, "score": score}}
