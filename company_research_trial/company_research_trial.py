@@ -90,6 +90,9 @@ def anysearch_quota_exhausted(result) -> bool:
     errors = result.stderr or ""
     if result.returncode or re.match(r"\s*(?:Search failed|API Error|Error\b)", output, re.I):
         errors += "\n" + output
+    elif re.match(r"\s*## Query \d+:", output):
+        # batch_search exits zero even when individual /v1/search requests fail.
+        errors += "\n" + "\n".join(re.findall(r"^Search failed:.*$", output, re.M))
     return bool(re.search(
         r"total free quota for today|insufficient[_\s-]*(?:quota|credits?|balance|funds)"
         r"|(?:quota|credits?|balance).{0,50}(?:exhausted|exceeded|depleted|used up|insufficient|reached)"

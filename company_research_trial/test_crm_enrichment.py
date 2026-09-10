@@ -151,13 +151,15 @@ class EnrichmentTests(unittest.TestCase):
                         "API Error: credits exhausted", "API Error: 额度已耗尽"):
             self.assertTrue(C.anysearch_quota_exhausted(SimpleNamespace(returncode=1, stderr=message, stdout="")))
         self.assertTrue(C.anysearch_quota_exhausted(SimpleNamespace(returncode=0, stderr="", stdout="Search failed: quota exceeded")))
+        self.assertTrue(C.anysearch_quota_exhausted(SimpleNamespace(returncode=0, stderr="", stdout="## Query 1: company\n\nSearch failed: quota exceeded\n\n---\n\n## Query 2: products\n\nA result")))
+        self.assertFalse(C.anysearch_quota_exhausted(SimpleNamespace(returncode=0, stderr="", stdout="## Query 1: company\n\nSearch failed: HTTP 429 Too many requests")))
         self.assertFalse(C.anysearch_quota_exhausted(SimpleNamespace(returncode=1, stderr="HTTP 429 Too many requests", stdout="")))
         self.assertFalse(C.anysearch_quota_exhausted(SimpleNamespace(returncode=0, stderr="", stdout="# A page about insufficient quota")))
 
     def test_quota_propagates_without_fallback_pauses_and_notifies_once(self):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(C.os.environ, {"ANYSEARCH_STOP_ON_QUOTA": "1"}), patch.object(C, "_ANYSEARCH_QUOTA_EXHAUSTED", C.threading.Event()), patch.object(C, "_public_web_fallback") as fallback, patch.object(C, "_invoke_hermes") as model, patch.object(M, "notify_quota_pause", return_value={"status": "submitted"}) as notify:
             run = Path(temporary); cli = run / "cli.js"; cli.touch()
-            response = SimpleNamespace(returncode=1, stderr="API Error: insufficient credits", stdout="")
+            response = SimpleNamespace(returncode=0, stderr="", stdout="## Query 1: company\n\nSearch failed: insufficient credits\n\n---\n\n## Query 2: products\n\nNo results")
             with patch.object(C, "ANYSEARCH_CLI", cli), patch.object(C, "ANYSEARCH_CACHE_DIR", run / "cache"), patch.object(C.subprocess, "run", return_value=response) as call:
                 M.run_queue(run, MANIFEST, [ROW, {**ROW, "id": "second"}], 1, 0, True, False)
                 self.assertEqual(call.call_count, 1)
