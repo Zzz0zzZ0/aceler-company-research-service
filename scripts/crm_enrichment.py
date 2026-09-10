@@ -31,6 +31,7 @@ from company_research_trial.dashboard import (
     DashboardHandler, _MAX_SETTINGS_BODY, _ResearchInputError, _parse_anysearch_key,
     _read_anysearch_key, _read_json_payload, _write_anysearch_key,
 )
+from company_research_trial.retrieval_policy import research_with_policy
 
 FIELDS = ("background", "industry", "rating")
 ADAPTER_VERSION = 3
@@ -130,8 +131,10 @@ def blank(value):
 
 def low_fit(item):
     validation = item.get("validation") or {}
+    policy = item.get("retrieval_policy") or {}
     score = validation.get("score")
     return (item.get("status") == "valid" and validation.get("valid") is True
+            and (policy.get("requested") != "website_first" or policy.get("used") == "baseline_confirmation")
             and (item.get("assessment") or {}).get("identity_status") == "confirmed"
             and not isinstance(score, bool) and isinstance(score, (int, float)) and 0 <= score < 20)
 
@@ -160,7 +163,16 @@ def prepare(row, index, run, manifest):
     if item and item.get("status") != "valid":
         save(directory / "previous-failures" / (str(time.time_ns()) + ".json"), item)
         item = None
-    item = item or research_one(seed, index, run)
+    if item is None:
+        policy_path = run / "retrieval-policy.json"
+        policy = read(policy_path) if policy_path.exists() else {"mode": "baseline"}
+        item = research_with_policy(seed, index, run, mode=policy["mode"],
+                                    audit=index % 10 == 0, researcher=research_one)
+        if (item.get("retrieval_policy") or {}).get("quality_alert"):
+            with (run / "retrieval-policy.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                save(policy_path, {"mode": "baseline", "changed_at": now(), "reason": "quality_audit_disagreement", "company_index": index})
+            save(directory / "quality-alert.json", item["retrieval_policy"])
     if item.get("status") != "valid":
         proposal = {"status": "failed", "reason": "Research did not complete", "errors": item.get("errors", [])}
     elif (item.get("assessment") or {}).get("identity_status") != "confirmed":
@@ -455,6 +467,8 @@ def status(run, *, emit=True):
         "progress": progress, "log": str(run / "worker.log")}
     if (run / "quota-alert.json").is_file():
         result["alert"] = read(run / "quota-alert.json")
+    if (run / "retrieval-policy.json").is_file():
+        result["retrieval_policy"] = read(run / "retrieval-policy.json")
     if emit:
         print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return result

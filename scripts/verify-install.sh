@@ -100,7 +100,8 @@ pass "Python requirements"
   company_research_trial.test_structured_evidence \
   company_research_trial.test_structured_evidence_pilot \
   company_research_trial.test_semantic_decision_validation \
-  company_research_trial.test_crm_enrichment
+  company_research_trial.test_crm_enrichment \
+  company_research_trial.test_retrieval_policy
 "$PYTHON_BIN" -m py_compile \
   company_research_trial/company_research_trial.py \
   company_research_trial/agent_contracts.py \
@@ -109,7 +110,9 @@ pass "Python requirements"
   company_research_trial/dashboard.py \
   company_research_trial/research_api.py \
   scripts/semantic_decision_validation.py \
-  scripts/crm_enrichment.py
+  scripts/crm_enrichment.py \
+  company_research_trial/retrieval_policy.py \
+  scripts/website_first_validation.py
 pass "validator、单元测试和 Python 编译"
 
 printf '\n离线安装验收通过；本脚本未调用 AnySearch、MiniMax 或 CRM。\n'

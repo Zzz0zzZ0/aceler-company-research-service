@@ -12,6 +12,7 @@ import argparse
 import ast
 import copy
 import concurrent.futures
+from contextvars import ContextVar
 import hashlib
 import html
 import ipaddress
@@ -83,6 +84,7 @@ class AnySearchQuotaExhausted(AnySearchPackError):
 
 
 _ANYSEARCH_QUOTA_EXHAUSTED = threading.Event()
+ANYSEARCH_REQUEST_METER = ContextVar("anysearch_request_meter", default=None)
 
 
 def anysearch_quota_exhausted(result) -> bool:
@@ -280,6 +282,15 @@ def run_anysearch_cli(args: list[str], timeout: int = 90) -> str:
         raise AnySearchPackError(f"AnySearch CLI unavailable: {ANYSEARCH_CLI}")
     environment = child_environment()
     environment["ANYSEARCH_CLI_PATH"] = str(ANYSEARCH_CLI)
+    meter = ANYSEARCH_REQUEST_METER.get()
+    if meter is not None:
+        command = args[0] if args else ""
+        queries = args.count("--query") if command == "batch_search" else int(command == "search")
+        if command == "batch_search" and "--queries" in args:
+            queries = len(json.loads(args[args.index("--queries") + 1]))
+        meter["search_requests"] += queries
+        meter["extract_requests"] += int(command == "extract")
+        meter["cli_attempts"] += 1
     result = subprocess.run(
         ["node", str(ANYSEARCH_BRIDGE), *args],
         cwd=PROJECT_DIR,
