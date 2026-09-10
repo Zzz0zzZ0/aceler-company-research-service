@@ -14,6 +14,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 from psycopg import sql
@@ -21,7 +22,7 @@ from psycopg import sql
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from company_research_trial.company_research_trial import (
-    DEFAULT_ENV_FILE, DEFAULT_HERMES, _invoke_hermes, _redact_sensitive,
+    DEFAULT_ENV_FILE, DEFAULT_HERMES, AnySearchQuotaExhausted, _invoke_hermes, _redact_sensitive,
     crm_connection, evidence_links, load_env_file, localize_item, render_assessment, research_one,
 )
 
@@ -54,6 +55,19 @@ def save(path, value):
 
 def read(path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def notify_quota_pause(message="AnySearch 额度已耗尽，CRM 批次已暂停并保存检查点。恢复额度后执行 resume。"):
+    if sys.platform != "darwin":
+        return {"status": "unavailable", "reason": "macOS notification is unavailable"}
+    try:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-", message], input='on run argv\ndisplay notification (item 1 of argv) with title "CRM 背调已暂停" sound name "Glass"\nend run',
+            text=True, capture_output=True, timeout=10, check=False,
+        )
+        return {"status": "submitted" if result.returncode == 0 else "failed", "returncode": result.returncode}
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"status": "failed", "reason": type(exc).__name__}
 
 
 def target():
@@ -108,6 +122,14 @@ def blank(value):
     return value is None or isinstance(value, str) and not value.strip()
 
 
+def low_fit(item):
+    validation = item.get("validation") or {}
+    score = validation.get("score")
+    return (item.get("status") == "valid" and validation.get("valid") is True
+            and (item.get("assessment") or {}).get("identity_status") == "confirmed"
+            and not isinstance(score, bool) and isinstance(score, (int, float)) and 0 <= score < 20)
+
+
 def updates(row, decision, background, score):
     result = {}
     if blank(row["background"]) or decision["background_action"] == "append":
@@ -137,6 +159,8 @@ def prepare(row, index, run, manifest):
         proposal = {"status": "failed", "reason": "Research did not complete", "errors": item.get("errors", [])}
     elif (item.get("assessment") or {}).get("identity_status") != "confirmed":
         proposal = {"status": "review", "reason": "Research failed or target identity is not confirmed", "errors": item.get("errors", [])}
+    elif low_fit(item):
+        proposal = {"status": "low_fit", "score": item["validation"]["score"], "reason": "Valid confirmed research score below 20"}
     else:
         if not item.get("translation") or item["translation"].get("status") == "failed":
             localize_item(item, DEFAULT_HERMES, 300, "medium")
@@ -256,14 +280,81 @@ def apply_one(row, index, run, manifest, proposal):
     return audit
 
 
+def delete_low_fit(row, index, run):
+    directory = run / "records" / f"{index:03d}-{row['id']}"
+    audit_path = directory / "deletion.json"
+    if audit_path.is_file():
+        return read(audit_path)
+    item = read(directory / "result.json")
+    if not low_fit(item) or (item.get("record") or {}).get("id") != row["id"]:
+        raise ValueError("Deletion requires valid, confirmed research with score below 20")
+    expected = dict(row)
+    if (directory / "apply.json").is_file():
+        applied = read(directory / "apply.json")
+        if applied["status"] in {"applied", "already_applied"}:
+            expected.update(applied["after"])
+    intent_path = directory / "deletion-intent.json"
+    intent = read(intent_path) if intent_path.exists() else None
+    audit = {"id": row["id"], "at": now(), "score": item["validation"]["score"],
+             "result_sha256": hashlib.sha256((directory / "result.json").read_bytes()).hexdigest(),
+             "operation": "soft_delete_company", "contacts_changed": False}
+    with crm_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("SET LOCAL statement_timeout = '30s'")
+        cursor.execute(statement("SELECT " + SELECT_FIELDS + ', c."deletedAt"::text AS deleted_at, (' + ELIGIBLE + ") AS eligible FROM {s}.company c WHERE c.id=%s FOR UPDATE OF c"), (row["id"],))
+        values = cursor.fetchone()
+        current = dict(zip([column.name for column in cursor.description], values)) if values else None
+        if current and intent and current["deleted_at"] == intent["deleted_at"]:
+            audit.update({"status": "already_deleted_low_fit", "before": intent["before"], "deleted_at": current["deleted_at"]})
+        elif not current or not current["eligible"]:
+            audit["status"] = "deletion_scope_changed"
+        elif any(current[key] != row[key] for key in SEED_FIELDS):
+            audit["status"] = "deletion_identity_changed"
+        elif any(current[key] != expected[key] for key in FIELDS):
+            audit["status"] = "deletion_conflict"
+        else:
+            # A DB-generated timestamp makes recovery distinguish our deletion from another actor's.
+            cursor.execute("SELECT clock_timestamp()::text")
+            deleted_at = cursor.fetchone()[0]
+            audit.update({"before": current, "deleted_at": deleted_at})
+            save(intent_path, audit)
+            cursor.execute(statement('UPDATE {s}.company c SET "deletedAt"=%s::timestamptz, "updatedAt"=now() WHERE c.id=%s AND ' + ELIGIBLE + ' RETURNING c."deletedAt"::text'), (deleted_at, row["id"]))
+            returned = cursor.fetchone()
+            if returned is None:
+                audit["status"] = "deletion_scope_changed"
+            elif returned[0] != deleted_at:
+                raise RuntimeError("CRM deletion timestamp differs from intent")
+            else:
+                audit["status"] = "deleted_low_fit"
+    save(audit_path, audit)
+    return audit
+
+
 def run_queue(run, manifest, rows, workers, limit, apply, apply_only):
     counts = Counter()
     started = time.monotonic()
+    quota_lock = threading.Lock()
+    quota_paused = False
+    def pause_for_quota():
+        nonlocal quota_paused
+        with quota_lock:
+            if quota_paused:
+                return
+            quota_paused = True
+            alert = {"at": now(), "reason": "anysearch_quota_exhausted",
+                     "message": "AnySearch 额度耗尽，已停止派发；恢复额度后执行 resume。"}
+            save(run / "STOP", alert)
+            save(run / "quota-alert.json", alert)
+            print(json.dumps(alert, ensure_ascii=False), flush=True)
+            alert["notification"] = notify_quota_pause()
+            save(run / "quota-alert.json", alert)
     def work(index, row):
         audit = run / "records" / f"{index:03d}-{row['id']}" / "apply.json"
-        if audit.is_file():
-            return read(audit)["status"]
         try:
+            result_path = audit.with_name("result.json")
+            if result_path.is_file() and low_fit(read(result_path)):
+                return delete_low_fit(row, index, run)["status"] if apply else "low_fit"
+            if audit.is_file():
+                return read(audit)["status"]
             if apply_only:
                 path = audit.with_name("proposal.json")
                 if not path.is_file():
@@ -271,9 +362,15 @@ def run_queue(run, manifest, rows, workers, limit, apply, apply_only):
                 proposal = read(path)
             else:
                 proposal = prepare(row, index, run, manifest)
+            if proposal["status"] == "low_fit":
+                return delete_low_fit(row, index, run)["status"] if apply else "low_fit"
             if proposal["status"] != "ready":
                 return proposal["status"]
             return apply_one(row, index, run, manifest, proposal)["status"] if apply else "ready"
+        except AnySearchQuotaExhausted:
+            pause_for_quota()
+            save(audit.with_name("error.json"), {"at": now(), "code": "anysearch_quota_exhausted", "retryable": True})
+            return "quota_exhausted"
         except Exception as exc:
             save(audit.with_name("error.json"), {"at": now(), "error": _redact_sensitive(f"{type(exc).__name__}: {exc}")})
             return "failed"
@@ -281,7 +378,14 @@ def run_queue(run, manifest, rows, workers, limit, apply, apply_only):
     remaining = []
     for index, row in selected:
         directory = run / "records" / f"{index:03d}-{row['id']}"
-        if (directory / "apply.json").is_file():
+        if (directory / "deletion.json").is_file():
+            counts[read(directory / "deletion.json")["status"]] += 1
+        elif (directory / "result.json").is_file() and low_fit(read(directory / "result.json")):
+            if apply:
+                remaining.append((index, row))
+            else:
+                counts["low_fit"] += 1
+        elif (directory / "apply.json").is_file():
             counts[read(directory / "apply.json")["status"]] += 1
         elif (directory / "proposal.json").is_file() and read(directory / "proposal.json").get("adapter_version") == ADAPTER_VERSION and read(directory / "proposal.json")["status"] != "failed" and (not apply or read(directory / "proposal.json")["status"] != "ready"):
             counts[read(directory / "proposal.json")["status"]] += 1
@@ -343,6 +447,8 @@ def status(run):
         phase = "interrupted"
     result = {"run_dir": str(run), "running": running, "state": phase, "pid": state.get("pid"),
         "progress": progress, "log": str(run / "worker.log")}
+    if (run / "quota-alert.json").is_file():
+        result["alert"] = read(run / "quota-alert.json")
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return result
 
@@ -352,6 +458,9 @@ def start(run, settings):
         fcntl.flock(control, fcntl.LOCK_EX)
         if locked(run):
             return status(run)
+        if (run / "quota-alert.json").is_file():
+            save(run / "alerts" / (str(time.time_ns()) + ".json"), read(run / "quota-alert.json"))
+            (run / "quota-alert.json").unlink()
         (run / "STOP").unlink(missing_ok=True)
         save(run / "settings.json", settings)
         command = [sys.executable, str(Path(__file__).resolve()), "run", "--run-dir", str(run),
@@ -414,6 +523,7 @@ def main():
         parser.error("workers must be 1..5 and limit must be nonnegative")
     load_env_file(DEFAULT_ENV_FILE)
     load_env_file(Path(settings["crm_env"]))
+    os.environ["ANYSEARCH_STOP_ON_QUOTA"] = "1"
     if args.command in {"start", "resume"}:
         manifest = read(args.run_dir / "manifest.json")
         if manifest["target"] != target():

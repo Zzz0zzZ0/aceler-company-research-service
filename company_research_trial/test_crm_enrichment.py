@@ -7,6 +7,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
+from company_research_trial import company_research_trial as C
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "crm_enrichment.py"
 SPEC = importlib.util.spec_from_file_location("crm_enrichment", SCRIPT)
@@ -23,6 +24,109 @@ def proposal(changes):
 
 
 class EnrichmentTests(unittest.TestCase):
+    def low_item(self, score=0):
+        return {"status": "valid", "record": ROW.copy(), "assessment": {"identity_status": "confirmed"},
+                "validation": {"valid": True, "score": score}}
+
+    def test_low_fit_requires_success_identity_and_strict_score_boundary(self):
+        self.assertTrue(M.low_fit(self.low_item(0)))
+        self.assertTrue(M.low_fit(self.low_item(19)))
+        self.assertFalse(M.low_fit(self.low_item(20)))
+        for change in ({"status": "failed"}, {"validation": {"valid": False, "score": 0}},
+                       {"assessment": {"identity_status": "unresolved"}},
+                       {"validation": {"valid": True, "score": None}}):
+            self.assertFalse(M.low_fit({**self.low_item(), **change}))
+
+    def test_low_fit_skips_translation_and_field_model(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "research_one", return_value=self.low_item()), patch.object(M, "localize_item") as translate, patch.object(M, "_invoke_hermes") as model:
+            result = M.prepare(ROW, 1, Path(temporary), MANIFEST)
+        self.assertEqual(result["status"], "low_fit")
+        translate.assert_not_called()
+        model.assert_not_called()
+
+    def test_soft_delete_and_commit_before_receipt_recovery(self):
+        current = {**ROW, "deleted_at": None, "eligible": True}
+        timestamp = "2026-09-10 03:00:00+00"
+        connection, cursor = self.connection(current)
+        cursor.fetchone.side_effect = [tuple(current.values()), (timestamp,), (timestamp,)]
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(M.os.environ, {"TWENTY_WORKSPACE_SCHEMA": "workspace_test"}):
+            run = Path(temporary); directory = run / "records" / f"001-{ROW['id']}"
+            M.save(directory / "result.json", self.low_item())
+            with patch.object(M, "crm_connection", return_value=connection):
+                result = M.delete_low_fit(ROW, 1, run)
+            self.assertEqual(result["status"], "deleted_low_fit")
+            query, params = cursor.execute.call_args.args
+            self.assertIn('SET "deletedAt"=', query.as_string())
+            self.assertIn("NOT EXISTS", query.as_string())
+            self.assertNotIn("DELETE FROM", query.as_string())
+            self.assertEqual(params, (timestamp, ROW["id"]))
+            (directory / "deletion.json").unlink()  # DB committed; receipt lost
+            recovered, cur = self.connection({**current, "deleted_at": timestamp, "eligible": False})
+            with patch.object(M, "crm_connection", return_value=recovered):
+                self.assertEqual(M.delete_low_fit(ROW, 1, run)["status"], "already_deleted_low_fit")
+            self.assertEqual(cur.execute.call_count, 2)
+            with patch.object(M, "crm_connection", side_effect=AssertionError("repeated deletion")):
+                self.assertEqual(M.delete_low_fit(ROW, 1, run)["status"], "already_deleted_low_fit")
+
+    def test_deletion_preserves_failed_research_and_live_changes(self):
+        for change, expected in [({"industry": "QI_TA"}, "deletion_conflict"),
+                                 ({"eligible": False}, "deletion_scope_changed"),
+                                 ({"name": "Renamed"}, "deletion_identity_changed")]:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary, patch.dict(M.os.environ, {"TWENTY_WORKSPACE_SCHEMA": "workspace_test"}):
+                run = Path(temporary); directory = run / "records" / f"001-{ROW['id']}"
+                M.save(directory / "result.json", self.low_item())
+                con, cur = self.connection({**ROW, "deleted_at": None, "eligible": True, **change})
+                with patch.object(M, "crm_connection", return_value=con):
+                    self.assertEqual(M.delete_low_fit(ROW, 1, run)["status"], expected)
+                self.assertEqual(cur.execute.call_count, 2)
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "crm_connection") as db:
+            run = Path(temporary)
+            M.save(run / "records" / f"001-{ROW['id']}" / "result.json", {**self.low_item(), "status": "failed"})
+            with self.assertRaises(ValueError):
+                M.delete_low_fit(ROW, 1, run)
+            db.assert_not_called()
+
+    def test_previously_enriched_low_fit_is_processed_for_deletion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary); directory = run / "records" / f"001-{ROW['id']}"
+            M.save(directory / "result.json", self.low_item())
+            M.save(directory / "apply.json", {"status": "applied"})
+            with patch.object(M, "delete_low_fit", return_value={"status": "deleted_low_fit"}) as delete, patch.object(M, "prepare") as prepare:
+                M.run_queue(run, MANIFEST, [ROW], 1, 0, True, False)
+            delete.assert_called_once()
+            prepare.assert_not_called()
+            self.assertEqual(M.read(run / "progress.json")["counts"], {"deleted_low_fit": 1})
+
+    def test_quota_detection_distinguishes_limits_and_page_content(self):
+        for message in ("API Error: You've reached your API key's total free quota for today.",
+                        "API Error: You've reached your API key's total quota.",
+                        "API Error: insufficient_quota", "API Error: Insufficient balance",
+                        "API Error: credits exhausted", "API Error: 额度已耗尽"):
+            self.assertTrue(C.anysearch_quota_exhausted(SimpleNamespace(returncode=1, stderr=message, stdout="")))
+        self.assertTrue(C.anysearch_quota_exhausted(SimpleNamespace(returncode=0, stderr="", stdout="Search failed: quota exceeded")))
+        self.assertFalse(C.anysearch_quota_exhausted(SimpleNamespace(returncode=1, stderr="HTTP 429 Too many requests", stdout="")))
+        self.assertFalse(C.anysearch_quota_exhausted(SimpleNamespace(returncode=0, stderr="", stdout="# A page about insufficient quota")))
+
+    def test_quota_propagates_without_fallback_pauses_and_notifies_once(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(C.os.environ, {"ANYSEARCH_STOP_ON_QUOTA": "1"}), patch.object(C, "_ANYSEARCH_QUOTA_EXHAUSTED", C.threading.Event()), patch.object(C, "_public_web_fallback") as fallback, patch.object(C, "_invoke_hermes") as model, patch.object(M, "notify_quota_pause", return_value={"status": "submitted"}) as notify:
+            run = Path(temporary); cli = run / "cli.js"; cli.touch()
+            response = SimpleNamespace(returncode=1, stderr="API Error: insufficient credits", stdout="")
+            with patch.object(C, "ANYSEARCH_CLI", cli), patch.object(C, "ANYSEARCH_CACHE_DIR", run / "cache"), patch.object(C.subprocess, "run", return_value=response) as call:
+                M.run_queue(run, MANIFEST, [ROW, {**ROW, "id": "second"}], 1, 0, True, False)
+                self.assertEqual(call.call_count, 1)
+                with self.assertRaises(C.AnySearchQuotaExhausted):
+                    C.run_anysearch_cli(["extract", "https://example.test"])
+                self.assertEqual(call.call_count, 1)
+            fallback.assert_not_called(); model.assert_not_called(); notify.assert_called_once()
+            self.assertEqual(M.read(run / "progress.json")["status"], "paused")
+            self.assertEqual(M.read(run / "progress.json")["completed"], 1)
+            self.assertEqual(M.status(run)["alert"]["reason"], "anysearch_quota_exhausted")
+            self.assertFalse((run / "records" / f"001-{ROW['id']}" / "apply.json").exists())
+            (run / "STOP").unlink()
+            with patch.object(M, "prepare", return_value={"status": "review"}) as resumed:
+                M.run_queue(run, MANIFEST, [ROW, {**ROW, "id": "second"}], 1, 0, False, False)
+            self.assertEqual(resumed.call_count, 2)
+
     def test_rating_boundaries_and_existing_values(self):
         for score, stars in [(0, 1), (19, 1), (20, 2), (39, 2), (40, 3), (60, 4), (79, 4), (80, 5), (100, 5)]:
             self.assertEqual(M.rating(score), f"RATING_{stars}")

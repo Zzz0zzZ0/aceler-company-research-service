@@ -78,6 +78,28 @@ class AnySearchPackError(RuntimeError):
     """A bounded AnySearch failure."""
 
 
+class AnySearchQuotaExhausted(AnySearchPackError):
+    """Stop a strict batch rather than falling back after quota exhaustion."""
+
+
+_ANYSEARCH_QUOTA_EXHAUSTED = threading.Event()
+
+
+def anysearch_quota_exhausted(result) -> bool:
+    output = result.stdout or ""
+    errors = result.stderr or ""
+    if result.returncode or re.match(r"\s*(?:Search failed|API Error|Error\b)", output, re.I):
+        errors += "\n" + output
+    return bool(re.search(
+        r"total free quota for today|insufficient[_\s-]*(?:quota|credits?|balance|funds)"
+        r"|(?:quota|credits?|balance).{0,50}(?:exhausted|exceeded|depleted|used up|insufficient|reached)"
+        r"|(?:reached|exceeded).{0,60}quota"
+        r"|(?:out of|not enough) credits?|quota limit.{0,20}reached"
+        r"|(?:额度|余额|积分).{0,12}(?:不足|耗尽|用完)|HTTP\s*402\b",
+        errors, re.I,
+    ))
+
+
 def resolved_validator() -> Path:
     """Use the validator versioned with this project."""
     return VALIDATOR
@@ -248,6 +270,9 @@ def read_candidates(limit: int) -> list[dict[str, Any]]:
 
 def run_anysearch_cli(args: list[str], timeout: int = 90) -> str:
     """Run the configured AnySearch CLI without persisting credentials."""
+    stop_on_quota = os.environ.get("ANYSEARCH_STOP_ON_QUOTA") == "1"
+    if stop_on_quota and _ANYSEARCH_QUOTA_EXHAUSTED.is_set():
+        raise AnySearchQuotaExhausted("AnySearch quota exhausted; resume after restoring quota")
     if not ANYSEARCH_CLI.is_file():
         raise AnySearchPackError(f"AnySearch CLI unavailable: {ANYSEARCH_CLI}")
     environment = child_environment()
@@ -262,8 +287,11 @@ def run_anysearch_cli(args: list[str], timeout: int = 90) -> str:
         timeout=timeout,
     )
     output = result.stdout or ""
-    quota_exhausted = "total free quota for today" in f"{result.stderr or ''}\n{output}".lower()
+    quota_exhausted = anysearch_quota_exhausted(result)
     if quota_exhausted:
+        if stop_on_quota:
+            _ANYSEARCH_QUOTA_EXHAUSTED.set()
+            raise AnySearchQuotaExhausted("AnySearch quota exhausted; resume after restoring quota")
         return _public_web_fallback(args, timeout)
     if result.returncode:
         detail = (result.stderr or output or f"exit {result.returncode}").strip()
@@ -1132,6 +1160,8 @@ def _extract_page_candidates(
             anysearch_calls += 1
             try:
                 extracted = run_anysearch_cli(["extract", url], timeout=timeout)
+            except AnySearchQuotaExhausted:
+                raise
             except Exception as exc:
                 errors.append(f"anysearch {url}: {str(exc)[:200]}")
                 continue
@@ -1305,6 +1335,8 @@ def anysearch_pack(
             timeout=20,
         )
         metadata["search_calls"] = 1
+    except AnySearchQuotaExhausted:
+        raise
     except Exception as exc:
         metadata["error"] = str(exc)
         search_output = ""
@@ -1392,6 +1424,8 @@ def anysearch_pack(
                 if _substantive_extract(extracted):
                     pages.append((url, extracted.strip()))
                     metadata["extracted_urls"].append(url)
+        except AnySearchQuotaExhausted:
+            raise
         except Exception as exc:
             metadata["supplemental_error"] = str(exc)
     if not pages:
@@ -1548,6 +1582,8 @@ def agentic_anysearch_pack(
     try:
         search_output = search(queries)
         search_call_count = 1
+    except AnySearchQuotaExhausted:
+        raise
     except Exception as exc:
         search_output = ""
         search_call_count = 1
@@ -2085,6 +2121,8 @@ def agentic_anysearch_pack(
         supplemental_args.extend(("--max_results", "10"))
         try:
             supplemental_output = run_anysearch_cli(supplemental_args, timeout=min(90, timeout))
+        except AnySearchQuotaExhausted:
+            raise
         except Exception as exc:
             supplemental_output = ""
             supplemental_search_error = str(exc)[:500]
@@ -2115,6 +2153,8 @@ def agentic_anysearch_pack(
                             ["batch_search", "--query", supplemental_retry_query, "--max_results", "5"],
                             timeout=min(90, timeout),
                         )
+                    except AnySearchQuotaExhausted:
+                        raise
                     except Exception as exc:
                         retry_output = ""
                         supplemental_search_error = str(exc)[:500]
@@ -2334,6 +2374,8 @@ def recall_first_anysearch_pack(
         primary_gaps = _retrieval_gap_reasons(primary_meta, primary_pack)
         if not primary_gaps:
             return primary_pack, primary_meta
+    except AnySearchQuotaExhausted:
+        raise
     except Exception as exc:
         primary_error = _redact_sensitive(str(exc))
 
@@ -2346,6 +2388,8 @@ def recall_first_anysearch_pack(
             reasoning=reasoning,
             max_sources=max_sources,
         )
+    except AnySearchQuotaExhausted:
+        raise
     except Exception as exc:
         identity_rejected = "selected no URL" in str(exc) or "Semantic identity rejected" in str(exc)
         if not primary_pack or identity_rejected or "identity_unverified" in primary_gaps:
@@ -3546,6 +3590,8 @@ def research_one(
                 )
             (record_dir / "anysearch-evidence.md").write_text(evidence_pack, encoding="utf-8")
             (record_dir / "anysearch-meta.json").write_text(json.dumps(search_meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except AnySearchQuotaExhausted:
+            raise
         except Exception as exc:
             errors.append(str(exc))
             evidence_pack = ""
