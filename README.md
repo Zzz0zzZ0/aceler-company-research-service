@@ -2,6 +2,8 @@
 
 本项目的核心链路接收来源中立的公司身份线索，使用 AnySearch 提供最多 3 个可信页面，再由标准库 Orchestrator 编排 Evidence Agent、Catalog Router、Lead、条件式 Recall Critic 和按需 Arbiter，按 `aceler-company-research` 仓库契约输出一份结构化背调。公司名是唯一必填项；官网和 LinkedIn 可选，行业、评级、背景或联系人等 CRM 字段既不必提供，也不会因缺失而降低评分。Twenty CRM 只是一个可选的只读抽样入口。每份候选 JSON 均交给仓库 validator；最终状态只有 `valid` 或 `failed`。
 
+另提供显式启用的 CRM 批量补充适配器，复用同一背调模块；首次使用 `--apply` 或 `apply` 命令启用写入，后台任务续跑保留此前的写入模式。支持固定清单、逐公司检查点、后台运行、停止和续跑，见 [批量补充操作说明](docs/crm-enrichment.md)。默认背调/API/抽样入口保持原有行为。
+
 新机器或同事的 Codex 请不要只照本页的简版命令安装。完整的固定版本、Hermes profile、业务记忆、AnySearch、Codex Skill 自动发现和验收步骤见 [`INSTALL-CODEX.md`](INSTALL-CODEX.md)。
 
 跨机器复现以基准机 `git rev-parse HEAD` 的完整提交号为准；`./scripts/verify-install.sh` 检查当前安装，`./scripts/verify-install.sh <基准提交号>` 额外核对提交及受跟踪文件是否干净。验收不再锁定历史 tag；profile 与 MEMORY 均对照当前仓库文件。
