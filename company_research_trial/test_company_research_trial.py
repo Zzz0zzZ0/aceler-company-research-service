@@ -675,6 +675,19 @@ RAW_PAGE_BODY_MUST_NOT_REACH_DECISION_AGENTS
         self.assertNotIn("GMAIL_TOKEN", environment)
         self.assertEqual(environment.get("ANYSEARCH_API_KEY"), "ok")
 
+    def test_child_environment_normalizes_ipv6_host_cidr_for_httpx(self) -> None:
+        original = {
+            "NO_PROXY": "localhost,::1/128,10.0.0.0/8,example.test",
+            "no_proxy": "::1,2001:db8::1/128,2001:db8::/32,invalid/128",
+            "HTTPS_PROXY": "http://127.0.0.1:7897",
+        }
+        with patch.dict(os.environ, original, clear=True):
+            environment = child_environment()
+            self.assertEqual(dict(os.environ), original)
+        self.assertEqual(environment["NO_PROXY"], "localhost,::1,10.0.0.0/8,example.test")
+        self.assertEqual(environment["no_proxy"], "::1,2001:db8::1,2001:db8::/32,invalid/128")
+        self.assertEqual(environment["HTTPS_PROXY"], original["HTTPS_PROXY"])
+
     def test_anysearch_uses_service_key_without_exposing_it_in_process_args(self) -> None:
         completed = SimpleNamespace(returncode=0, stdout="results", stderr="")
         with patch.dict("os.environ", {"ANYSEARCH_API_KEY": "new-service-key"}, clear=False), patch(
@@ -2345,6 +2358,7 @@ RAW_PAGE_BODY_MUST_NOT_REACH_DECISION_AGENTS
         self.assertEqual(rows[0]["name"], "Example")
         self.assertEqual(cursor.execute.call_args_list[0].args[0], "BEGIN READ ONLY")
         self.assertIn("%s", cursor.execute.call_args_list[2].args[0])
+        self.assertIn("company.level::text IS DISTINCT FROM 'WU_XIAO'", cursor.execute.call_args_list[2].args[0])
 
     def test_reports_have_four_modules_and_only_two_states(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

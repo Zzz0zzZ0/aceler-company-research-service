@@ -38,6 +38,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from company_research_trial.agent_contracts import AgentCandidate, ArbitrationDecision, EvidenceBundle
 from company_research_trial.orchestration import orchestrate_assessment
 from company_research_trial.structured_evidence import compact_evidence_pack, extraction_prompt, prepare_structured_evidence
+from company_research_trial import anysearch_key_pool
 
 
 TRIAL_DIR = Path(__file__).resolve().parent
@@ -246,6 +247,7 @@ def read_candidates(limit: int) -> list[dict[str, Any]]:
           FROM "{schema}".company company
           LEFT JOIN contact_counts ON contact_counts."companyId" = company.id
           WHERE company."deletedAt" IS NULL
+            AND company.level::text IS DISTINCT FROM 'WU_XIAO'
             AND company.industry::text IN ({industry_sql})
             AND NULLIF(btrim(company.name), '') IS NOT NULL
             AND NULLIF(btrim(company."domainNamePrimaryLinkUrl"), '') IS NOT NULL
@@ -276,30 +278,37 @@ def read_candidates(limit: int) -> list[dict[str, Any]]:
 def run_anysearch_cli(args: list[str], timeout: int = 90) -> str:
     """Run the configured AnySearch CLI without persisting credentials."""
     stop_on_quota = os.environ.get("ANYSEARCH_STOP_ON_QUOTA") == "1"
-    if stop_on_quota and _ANYSEARCH_QUOTA_EXHAUSTED.is_set():
+    pool_path = os.environ.get("ANYSEARCH_KEY_POOL_FILE")
+    if stop_on_quota and not pool_path and _ANYSEARCH_QUOTA_EXHAUSTED.is_set():
         raise AnySearchQuotaExhausted("AnySearch quota exhausted; resume after restoring quota")
     if not ANYSEARCH_CLI.is_file():
         raise AnySearchPackError(f"AnySearch CLI unavailable: {ANYSEARCH_CLI}")
     environment = child_environment()
     environment["ANYSEARCH_CLI_PATH"] = str(ANYSEARCH_CLI)
-    meter = ANYSEARCH_REQUEST_METER.get()
-    if meter is not None:
-        command = args[0] if args else ""
-        queries = args.count("--query") if command == "batch_search" else int(command == "search")
-        if command == "batch_search" and "--queries" in args:
-            queries = len(json.loads(args[args.index("--queries") + 1]))
-        meter["search_requests"] += queries
-        meter["extract_requests"] += int(command == "extract")
-        meter["cli_attempts"] += 1
-    result = subprocess.run(
-        ["node", str(ANYSEARCH_BRIDGE), *args],
-        cwd=PROJECT_DIR,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout,
-    )
+    for attempt in range(anysearch_key_pool.MAX_KEYS if pool_path else 1):
+        selected = anysearch_key_pool.select_key(pool_path) if pool_path else None
+        if pool_path and selected is None:
+            raise AnySearchQuotaExhausted("All configured AnySearch keys are exhausted; add or restore a key")
+        if selected:
+            environment["ANYSEARCH_API_KEY"] = selected[1]
+        meter = ANYSEARCH_REQUEST_METER.get()
+        if meter is not None:
+            _count_anysearch_attempt(args, meter)
+        result = subprocess.run(
+            ["node", str(ANYSEARCH_BRIDGE), *args],
+            cwd=PROJECT_DIR, env=environment, capture_output=True, text=True,
+            check=False, timeout=timeout,
+        )
+        if selected:
+            # Never let a provider's diagnostic echo a pooled credential into artifacts.
+            result.stdout = (result.stdout or "").replace(selected[1], "[redacted]")
+            result.stderr = (result.stderr or "").replace(selected[1], "[redacted]")
+        if pool_path and anysearch_quota_exhausted(result):
+            anysearch_key_pool.mark_exhausted(pool_path, selected[0])
+            continue
+        break
+    else:
+        raise AnySearchQuotaExhausted("AnySearch key failover limit reached; inspect key pool")
     output = result.stdout or ""
     quota_exhausted = anysearch_quota_exhausted(result)
     if quota_exhausted:
@@ -320,6 +329,16 @@ def run_anysearch_cli(args: list[str], timeout: int = 90) -> str:
     if "auto_registered" in output and '"api_key"' in output:
         raise AnySearchPackError("AnySearch returned a new API key; refusing to save or use it")
     return output
+
+
+def _count_anysearch_attempt(args, meter):
+    command = args[0] if args else ""
+    queries = args.count("--query") if command == "batch_search" else int(command == "search")
+    if command == "batch_search" and "--queries" in args:
+        queries = len(json.loads(args[args.index("--queries") + 1]))
+    meter["search_requests"] += queries
+    meter["extract_requests"] += int(command == "extract")
+    meter["cli_attempts"] += 1
 
 
 def _duckduckgo_results(query: str, max_results: int, timeout: int) -> list[tuple[str, str, str]]:
@@ -2541,11 +2560,25 @@ def extract_json_object(raw: str) -> dict[str, Any]:
 
 def child_environment() -> dict[str, str]:
     """Do not expose CRM or message-delivery credentials to Hermes."""
-    return {
+    environment = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith(("TWENTY_", "OUTBOX_", "EMAIL_", "GMAIL_"))
     }
+    # HTTPX misparses IPv6 /128 bypass entries as ports; a literal is equivalent.
+    for key in ("NO_PROXY", "no_proxy"):
+        if key not in environment:
+            continue
+        entries = environment[key].split(",")
+        for index, entry in enumerate(entries):
+            try:
+                network = ipaddress.IPv6Network(entry.strip())
+            except ValueError:
+                continue
+            if network.prefixlen == 128:
+                entries[index] = str(network.network_address)
+        environment[key] = ",".join(entries)
+    return environment
 
 
 def _compact_evidence_for_decision(evidence_pack: str) -> str:

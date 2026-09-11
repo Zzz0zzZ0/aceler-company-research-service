@@ -1,126 +1,380 @@
-# Aceler Company Research Trial
+# Aceler 公司背调服务
 
-本项目的核心链路接收来源中立的公司身份线索，使用 AnySearch 提供最多 3 个可信页面，再由标准库 Orchestrator 编排 Evidence Agent、Catalog Router、Lead、条件式 Recall Critic 和按需 Arbiter，按 `aceler-company-research` 仓库契约输出一份结构化背调。公司名是唯一必填项；官网和 LinkedIn 可选，行业、评级、背景或联系人等 CRM 字段既不必提供，也不会因缺失而降低评分。Twenty CRM 只是一个可选的只读抽样入口。每份候选 JSON 均交给仓库 validator；最终状态只有 `valid` 或 `failed`。
+面向 Aceler 产品组合的企业背调模块：核验公司主体，收集公开证据，识别公司角色、工艺和采购方向，输出可追溯的匹配评分、产品建议与报告。核心背调可脱离 CRM 运行；Twenty CRM 抽样和批量回填是可选适配器。
 
-另提供显式启用的 CRM 批量补充适配器，复用同一背调模块；首次使用 `--apply` 或 `apply` 命令启用写入，后台任务续跑保留此前的写入模式。该批次模式还按授权软删除有效背调且匹配度低于 20 分的公司，失败与主体不确定的记录不删除。支持固定清单、逐公司检查点、后台运行、停止和续跑，以及 AnySearch 额度耗尽暂停与本机通知，见 [批量补充操作说明](docs/crm-enrichment.md)。默认背调/API/抽样入口保持原有行为。
+**交接分支：`codex/crm-enrichment-20260909`。** 本次交接包含 CRM 无效标记、联系人保护和 AnySearch Key 池；不要只克隆较早的 `main` 后假定包含这些功能。交接双方用 `git rev-parse HEAD` 记录完整提交号，复现时以同一提交为准。
 
-新机器或同事的 Codex 请不要只照本页的简版命令安装。完整的固定版本、Hermes profile、业务记忆、AnySearch、Codex Skill 自动发现和验收步骤见 [`INSTALL-CODEX.md`](INSTALL-CODEX.md)。
+**Git 只交付代码、测试和文档。当前队列、业务结果、恢复快照、Key 池及密钥配置均留在原机，不随本次推送迁移。** 新机器不能仅凭仓库恢复原机进度；也不要在另一台机器另建相同范围的写入队列与原机同时运行。
 
-跨机器复现以基准机 `git rev-parse HEAD` 的完整提交号为准；`./scripts/verify-install.sh` 检查当前安装，`./scripts/verify-install.sh <基准提交号>` 额外核对提交及受跟踪文件是否干净。验收不再锁定历史 tag；profile 与 MEMORY 均对照当前仓库文件。
+## 目录
 
-## Setup
+- [功能边界与入口](#功能边界与入口)
+- [安装与配置](#安装与配置)
+- [如何启动](#如何启动)
+- [CRM 数据规则](#crm-数据规则)
+- [AnySearch Key 池](#anysearch-key-池)
+- [作为另一项目的模块](#作为另一项目的模块)
+- [日常维护](#日常维护)
+- [更新、回退与迁移](#更新回退与迁移)
+- [故障处理](#故障处理)
+- [验收与指标](#验收与指标)
+- [代码和文档导航](#代码和文档导航)
 
-先确认 `python3` 为 3.11 或以上，再创建本机虚拟环境：
+## 功能边界与入口
+
+| 入口 | 用途 | CRM 访问 | 运行方式 |
+| --- | --- | --- | --- |
+| `research_api.research_company()` | Python 单家公司背调 | 无 | 同步函数调用 |
+| `python -m company_research_trial.research_api` | JSON stdin/stdout，供其他语言调用 | 无 | 单次进程 |
+| `python -m company_research_trial.company_research_trial --selected-file …` | 固定 JSON 公司清单 | 无 | 前台批量运行 |
+| 同一批量 CLI，不传 `--selected-file` | 抽样背景薄弱的 CRM 公司 | 只读，默认最多 20 家 | 前台批量运行 |
+| `python -m company_research_trial.dashboard` | 浏览结果、提交手工单家公司背调 | 无 | 前台 HTTP 服务 |
+| `scripts/crm-enrichment` | 冻结清单、背调、受保护回填、暂停续跑 | 显式 `--apply` / `apply` 后可写公司 | 持久化后台队列 |
+| `scripts/crm-enrichment key-ui` | 管理 Key 池及 CRM 队列 | 启动的 worker 按保存的写入模式执行 | 独立本机 HTTP 服务 |
+
+公司名称是唯一必填线索；官网和 LinkedIn 可选。API 请求只接受 `name`、`website`、`linkedin_url`，网址须为有效 HTTP(S) URL。格式校验不等于公司主体已确认，主体仍需通过公开证据核验。缺失 CRM 背景、行业、评级或联系人不会降低核心背调评分。
+
+核心背调状态只有 `valid` / `failed`；CRM 队列另有写入、复核、冲突和额度暂停等状态。`valid` 表示结果通过结构校验，不能直接解释为公司判断准确。本项目不发送开发信，不执行联系人跟进；其他系统的无效公司拦截需单独应用。
+
+## 安装与配置
+
+### 1. 获取正确版本
 
 ```bash
+git clone --branch codex/crm-enrichment-20260909 \
+  https://github.com/Zzz0zzZ0/aceler-company-research-service.git
+cd aceler-company-research-service
+git rev-parse HEAD
+git status --short
+```
+
+以下命令默认在本仓库根目录执行。路径含空格或中文时，使用双引号包围变量。完整外部依赖安装步骤在 [INSTALL-CODEX.md](INSTALL-CODEX.md)，首次安装不能只执行 pip 后跳过它。
+
+### 2. 安装依赖
+
+| 依赖 | 本项目基准 | 作用 |
+| --- | --- | --- |
+| Python | 3.11+，使用项目 `.venv` | 主流程、看板、CRM 适配器 |
+| Node.js | 基准 Node 22 | 调用 AnySearch CLI |
+| Hermes Agent | `0.20.4` | 模型调用；不要无计划升级 |
+| 模型 / provider | `MiniMax-M3` / `minimax-cn` | 以结果实际 `usage` 为准 |
+| AnySearch | v3.1.0，固定提交 `4d6cef918e9338c9deef43b81ac0f7e22606825f` | 搜索与页面提取 |
+| `psycopg[binary]` | 见 `requirements.txt` | CRM 数据库访问；无 CRM 时不连接 |
+
+```bash
+python3 --version
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 test -f config/local.env || cp config/local.env.example config/local.env
+chmod 600 config/local.env
 ```
 
-只有使用默认 CRM 抽样入口时，才需要在 `config/local.env` 中填写本机 CRM 连接配置。固定文件、Python API 或 JSON stdin/stdout 调用不需要 CRM。该文件和运行结果不会进入 Git。
+AnySearch 安装位置固定为 `~/.codex/skills/anysearch/scripts/anysearch_cli.js`；Hermes 默认执行文件为 `~/.local/bin/aceler-memory`。两者不包含在 Git 克隆中。完整 profile 配置和业务记忆在 `config/hermes/aceler-memory/`，按安装文档安装到本机 Hermes profile，不能删减业务记忆来加速。
 
-### Hermes 精确运行配置
+profile 的兼容默认模型仍为 MiniMax-M2.7，服务显式覆盖为 M3 / minimax-cn；不要仅据 profile 判断实际模型。`ACELER_HERMES_MODEL` / `ACELER_HERMES_PROVIDER` 可覆盖运行配置，交接复现时应维持基准。
 
-仓库直接提供当前生产使用的完整通用业务记忆和 Hermes profile 配置：[`config/hermes/aceler-memory/`](config/hermes/aceler-memory/)。它包含完整产品主档、工艺映射、客户画像、评分和证据边界，没有删减业务规则。当前基准运行环境为 Hermes Agent `0.20.4`、MiniMax-M3、`minimax-cn` provider；不同模型或版本不属于精确复现。
+### 3. 配置的归属和优先级
 
-profile 的兼容默认模型仍为 MiniMax-M2.7，服务通过显式 `--model MiniMax-M3 --provider minimax-cn` 覆盖它。`ACELER_HERMES_MODEL` / `ACELER_HERMES_PROVIDER` 可临时覆盖服务配置；复现时须核对结果 `usage` 中的实际模型与 provider。
+| 配置 | 位置 / 变量 | 注意事项 |
+| --- | --- | --- |
+| MiniMax 凭据 | `~/.hermes/profiles/aceler-memory/.env` 中的 `MINIMAX_CN_API_KEY` | profile 私有文件设为 0600，不放入 CRM、邮箱等无关凭据 |
+| 单 AnySearch Key | `config/local.env` 的 `ANYSEARCH_API_KEY` | 核心入口一般保留已有父进程环境值；CRM 入口优先读取本地文件中的 Key |
+| 多 Key 池 | `config/anysearch-keys.json` | 用本机 Key 页面管理，0600，不手工打印内容 |
+| 独立入口使用 Key 池 | `ANYSEARCH_KEY_POOL_FILE` 为池文件绝对路径 | CRM worker 自动接入；普通 CLI/API 需要显式设置 |
+| CRM 连接 | `TWENTY_DB_HOST/PORT/NAME/USER/PASSWORD/SSLMODE/CONNECT_TIMEOUT`、`TWENTY_WORKSPACE_SCHEMA` | 可放独立 env 文件，用 `--crm-env` 指定；示例连接值不能直接用于生产 |
+| 模型覆盖 | `ACELER_HERMES_MODEL`、`ACELER_HERMES_PROVIDER` | 每次对照实际 usage；环境中残留的旧值可能覆盖文件 |
+
+普通 env 加载使用“已有环境变量优先”，不要把宿主项目的一整套环境误传入模块。CRM 先加载项目 env 再加载指定 CRM env，已存在的 CRM 变量不会被后者覆盖；应只在一个明确位置维护有效 CRM 配置。目标指纹不一致时队列拒绝执行，不要修改指纹绕过保护。
+
+Key 设置页只返回脱敏标识，完整凭据不应出现在聊天、截图、命令行参数、提交或日志中。`config/local.env`、池文件及其临时文件均在 `.gitignore` 中。
+
+### 4. 先做离线验收
 
 ```bash
-hermes profile create aceler-memory --no-skills \
-  --description "Aceler approved product and industrial-process knowledge"
-install -m 644 config/hermes/aceler-memory/config.yaml \
-  "$HOME/.hermes/profiles/aceler-memory/config.yaml"
-install -m 600 config/hermes/aceler-memory/MEMORY.md \
-  "$HOME/.hermes/profiles/aceler-memory/memories/MEMORY.md"
+bash scripts/verify-install.sh
 ```
 
-在该 profile 自己的 `.env` 中配置调用方持有的 `MINIMAX_CN_API_KEY`，不要提交密钥。`hermes profile create` 默认生成 `aceler-memory` 包装命令，与本项目默认调用路径一致。已有同名 profile 时先比较配置，不要直接覆盖。跨机器对照还要求相同项目提交、输入、reasoning 和并发参数；排查检索时保留实时证据并记录缓存，仅做语义 A/B 时才复用同一份已保存证据。记忆不是网页来源，不能进入 `sources`。
-
-## Run
+它检查运行时版本、AnySearch 提交和 CLI 哈希、Hermes profile/业务记忆、validator、自测与编译，不调用付费搜索、模型或 CRM。对照交接提交且工作区干净时：
 
 ```bash
-.venv/bin/python -m company_research_trial.company_research_trial
+ACELER_REPRO_REF='交接提供的完整提交号'
+bash scripts/verify-install.sh "$ACELER_REPRO_REF"
 ```
 
-默认报告写入 `outputs/company-research-trial/<UTC时间>-<来源>-n<公司数>/`，例如 `20260827T071500Z-crm-n020` 或 `20260827T071500Z-file-n005`。CRM 查询包含 `BEGIN READ ONLY`，不会写 CRM 或接入发信流程。固定样本可以这样运行：
+## 如何启动
 
-```bash
-.venv/bin/python -m company_research_trial.company_research_trial \
-  --selected-file outputs/company-research-trial/<old-run>/selected-companies.json \
-  --workers 3
-```
+### 无 CRM：单家公司冒烟与模块 API
 
-## 供其他模块调用
-
-同一台机器上的 Python 模块可以直接调用当前生产背调链路，不读取 CRM：
-
-```python
-from company_research_trial.research_api import research_company
-
-result = research_company(
-    {
-        "name": "Hatria",
-        "website": "https://hatria.com",
-        "linkedin_url": None,
-    }
-)
-```
-
-返回对象固定包含 `trace_id`、`status`、`assessment`、`validation`、`report_markdown`、`usage` 和 `errors`。`status` 只有 `valid` / `failed`；检索、Lead 重试、条件 Recall、按需仲裁、validator 和审计文件均复用同一生产实现。
-
-非 Python 调用方使用 JSON stdin/stdout 适配器：
+以下会产生真实搜索及模型调用费用。离线验收通过后，先用一家公司验证，再扩大范围：
 
 ```bash
 printf '%s\n' '{"name":"Hatria","website":"https://hatria.com"}' \
   | .venv/bin/python -m company_research_trial.research_api
 ```
 
-stdout 始终只有一个 JSON 对象。退出码 `0` 表示 `valid`，`1` 表示背调完成但结果为 `failed`，`2` 表示输入或运行配置错误。请求只接受 `name`、`website`、`linkedin_url`；调用仍会在 `outputs/company-research-trial/<UTC时间>-api-n001/` 保留完整审计产物。
+stdout 为一个 JSON 对象，包含 `trace_id`、`status`、`assessment`、`validation`、`report_markdown`、`usage`、`errors`。退出码：`0` 有效结果，`1` 背调结果失败，`2` 输入或运行配置错误。错误对象的占位分数不能作为低相关度判断。
 
-每家公司流程固定为：来源中立的 identity seed（可只有公司名）→ AnySearch 批量检索主体/产品与工厂/工艺并提取最多 3 页 → 长页面 Evidence Agent 引文核验与事实压缩 → Catalog Router 召回优先选取相关产品行 → Lead → 条件 Recall Critic → 按需 Arbiter → 仓库 validator。各角色只获得完成自己任务所需的上下文：Lead 不再接收整页原文和全部产品规则；Recall 独立使用完整产品矩阵审计 Router 漏选；Arbiter 只看争议产品规则和两份候选。原始证据仍保存在审计文件中，不用业务正则替代模型做语义判断。
+```python
+from company_research_trial.research_api import research_company
 
-普通请求仅在主检索抛出失败时调用一次已有的语义备用检索。主检索成功时直接返回原证据（包括缓存与只有公司名的输入），不因证据偏弱而扩展检索或改写证据。备用检索必须明确返回 `identity_status=confirmed` 且不存在重试后主体仍未解决的标记，才继续原评分流程；`related`、`ambiguous`、缺失身份状态或备用检索失败均继续返回失败。此身份门槛不代表产品/工艺缺口已关闭，也不代表最终跟进判断正确。显式 `refresh_evidence_cache=True` 仍保留原有刷新检索语义。
-
-成功恢复时 `anysearch-meta.json` 的 `mode` 为 `failure_recovery`，`recall_recovery.primary_error` 保存脱敏的主检索错误，`retrieval_agent_calls` 单列检索角色调用数。`call_counts_scope=recovery_only` 表示其中的检索/提取计数仅覆盖备用检索：旧主检索异常不携带完整计数，不能将这些数字当作整条失败恢复链路的总成本。没有可信证据时，错误明确说明评分 Agent 未启动。
-
-2026-09-08 的最小失败恢复版本通过 136 项回归、validator 自检与编译；100-3 历史证据路由回放中，原 98 家成功记录全部原样返回、不调用补检，2 条失败记录的备用证据中接受 1 条、拒绝主体不确定的 1 条。此回放没有重新评分，不能称为 99/100 全流程有效。真实第 88 家联网回测本次仅确认关联主体，仍拒绝；独立 Hatria 故障注入测试（只模拟主检索抛错，备用检索和评分均真实执行）得到 validator-valid 结果。记录在本地 `outputs/failure-only-recovery-20260908/`。本次只保留失败恢复，没有恢复此前已撤回的默认弱证据扩展，也不声称整体精确率或跨 Mac 有效率已提高。
-
-输入字段只是待核验线索；公司角色、工艺和产品映射以本次证据包为准。AnySearch 证据包只采集一次，后续 Agent 禁止搜索。Lead 或校验失败时默认最多尝试 3 次，可用 `--max-attempts 1` 关闭重试。重试只修正 JSON、枚举和证据引用，不自动放行；每轮保留独立的 raw、usage、`evidence-bundle.json` 和 `orchestration.json` 审计文件。
-
-### 当前验证基线
-
-2026-09-04 在 100 家 CRM 标注集、MiniMax-M3、5 并发上的同证据语义 A/B 结果为：100/100 有效，召回率 91.07%，精确率 82.26%，TP/FP/TN/FN 为 51/11/33/5。对比旧版，召回率由 87.50% 提高 3.57 个百分点，精确率由 84.48% 下降 2.22 个百分点，准确率保持 84.00%。
-
-2026-09-07 在新测试集 100-4、MiniMax-M3、5 并发的实时全流程结果为：100/100 有效，召回率 88.57%，精确率 80.52%，准确率 77.00%，TP/FP/TN/FN 为 62/15/15/8；人工正例/负例为 70/30。该批次同时通过召回率高于 80% 与精确率不低于 75% 的门槛，但负例特异度仅为 50.00%，下一轮应优先收紧上游供应商/同行、Holding/集团主体和设备工程邻接路线，同时保持召回门槛。正常 Lead 路径最大输入约 31,073 字符；AB Megamet 的 Evidence Agent 未产出合法 JSON，失败开放回退原证据后达到 40,309 字符，说明异常降级路径仍有进一步压缩空间。
-
-同日 100-3 使用原流程、MiniMax-M3、5 并发运行，98/100 有效，召回率 83.93%、精确率 83.93%、准确率 81.00%；TP/FP/TN/FN 为 47/9/34/8，另有正例、负例各 1 家检索失败，未额外补跑。召回率按全部 56 家人工正例计算，准确率按全部 100 家计算。耗时 1,492.6 秒，Recall 触发 19 次、采用 0 次；本地审计目录为 `outputs/semantic-decision-validation/20260907T033244Z-testset100-3-m3/`（不进入 Git）。原七列 Markdown 只在兼容副本中补空地址列、展开网址链接，人工标签未改动。
-
-100-3 有 5 家命中缓存，98 家有效记录中 92 家取得过本机 HTTP 抓取页面。因此整体有效率不能当作 AnySearch API 成功率；复制仓库后还须核对外部 AnySearch CLI、key 配置、Python/Node、macOS 系统代理和实际 `input-records.json`。详见安装文档的跨 Mac 检索排查；离线验收不代替联网验证。
-
-2026-09-10 的官网优先省额度试验未推广：固定 20 家人工标注配对样本中，召回率 80%→70%，精确率 80%→87.5%，准确率同为 80%，请求尝试数 132→134。试验归档到 `codex/website-first-trial-20260910`，生产保留原检索和评分，仅新增按单条查询记录的请求计量。样本结果不能代表完整 100 家或未标注 CRM 的总体准确率。
-
-2026-09-04 同证据语义 A/B 中，Lead 实际输入 token 中位数从 16,101 降至 4,974，最大值从 43,402 降至 6,572；所有语义 Agent 总输入 token 从 2,492,831 降至 917,868，减少 63.18%。Agent 调用由 139 次增至 225 次，但墙钟时间仅由 781.6 秒增至 806.1 秒，单家中位耗时由 33.2 秒降至 29.1 秒。该基线复用同一批已保存证据，因此 AnySearch 为 0 次；另外的 SARRALLE 实时冒烟已验证 Evidence Agent 能将 15,543 字符原页压缩为 15 条引文可核验事实和 4,565 字符下游上下文。
-
-主 Hermes 调用必须直接用中文填写所有展示性自由文本，并保留公司/人名、产品专名、牌号、工艺缩写、数字和单位。Validator 完成后，系统剔除这些允许保留的英文专名；只有仍检测到英文说明时才执行一次失败开放的中文本地化。原始 canonical assessment、分数、枚举、证据 ID、URL 和产品字段保持不变；翻译结果单独写入 `display_assessment` 与 `localized-assessment.json`，仅供报告和看板使用。翻译超时、输出结构变化或受保护术语被改动时直接显示原文，不改变背调状态或主调用结果。
-
-首次合法结果为 0%，或低于 55% 且已经确认相关工艺、材料角色、采购方向或渠道角色时，系统使用同一证据包调用独立 Recall Critic，专门排查生产投入、高温耗材和技术渠道是否被遗漏。Critic 改变分数、跟进结论或产品路线时必须再经 Arbiter；仲裁无效或拒绝时保留 Lead，且整个过程不会触发新搜索。兼容性关闭开关仍为 `--no-zero-review`。
-
-Hermes prompt 使用 `$aceler-company-research` 与唯一 JSON skeleton。Hermes 基于完整证据做五维语义评分：`production_process_need`（0–30）、`catalog_fit`（0–30）、`consumption_intensity`（0–20）、`demand_recurrence`（0–10）、`company_role_fit`（0–10），validator 只验范围并求和后向下取 5。评分覆盖直接消耗、分销、工程/规格影响、互补供应和产品组合合作；已确认的公司产品/工艺可支持合理工业推断，未公开采购或私有配方只降低置信度，不把已成立的路径清零。行业标签或遥远邻接关系本身仍不加分。
-
-产品名称必须来自固定 26 项目录。Graphite Electrode 需要确认 EAF；感应炉不使用石墨电极，镁质方向在没有衬里化学时只能写有依据的推测、低优先级并提出确认问题，不能标为已确认。不能为了填表发明没有官网依据的产品方向。
-
-Validator 只硬校验 JSON 结构、合法枚举与范围、固定产品目录、证据 ID 和来源 URL 溯源。产品/工艺是否成立由 Hermes 依据完整证据包和 skill 契约判断；validator 不再对 `confirmed_processes` 自由文本做关键词或精确字符串裁决。置信度与身份/官方证据的矛盾只产生 warning，不触发重试或失败。
-
-## Validator
-
-```bash
-.venv/bin/python skill/aceler-company-research/scripts/validate_assessment.py --self-test
+result = research_company(
+    {"name": "Hatria", "website": "https://hatria.com"},
+    timeout=300,
+    reasoning="medium",
+    max_attempts=3,
+)
 ```
 
-服务运行只使用仓库内随提交固定的 Skill 契约和 validator，不依赖另一份 Hermes 全局 Skill。若同事还要在 Codex/Hermes 中直接调用独立 Skill，再单独安装同一提交中的 `skill/aceler-company-research/`。不要添加版本字段；历史结果仅由看板只读浏览，不迁移旧字段。
+`timeout` 是调用配置，不是整家公司总耗时上限；一家公司可能包含多轮检索、Agent、重试和翻译。
 
-## Test
+### 无 CRM：固定公司清单
+
+创建本机 JSON 数组，例如 `inputs/companies.json`：
+
+```json
+[{"id":"sample-001","name":"Hatria","website":"https://hatria.com"}]
+```
+
+```bash
+.venv/bin/python -m company_research_trial.company_research_trial \
+  --selected-file inputs/companies.json --workers 3
+```
+
+`--selected-file` 读取的是 JSON，不是原始 Markdown 测试集。默认输出到 `outputs/company-research-trial/<UTC时间>-file-n…/`。不传该参数会走 CRM 只读抽样，不能将无参数命令当作“启动空服务”。
+
+### 结果看板
+
+```bash
+mkdir -p outputs/company-research-trial
+.venv/bin/python -m company_research_trial.dashboard \
+  --host 127.0.0.1 --port 8766
+```
+
+打开 `http://127.0.0.1:8766/`。结果只读，新建背调一次接受一家，不写 CRM。上面是前台服务，终端 Ctrl+C 可停止；不会停止独立 CRM worker。
+
+默认不传 `--host` 时监听 `0.0.0.0:8766`，会向当前网络暴露业务结果，交接默认使用回环地址。看板默认只扫描 `outputs/company-research-trial`。要浏览 CRM 批次结果，另选空闲端口并指定批次的父目录：
+
+```bash
+mkdir -p outputs/crm-enrichment
+.venv/bin/python -m company_research_trial.dashboard \
+  --host 127.0.0.1 --port 8767 --output-root outputs/crm-enrichment
+```
+
+看板单 Key 设置写入 `config/local.env`；CRM Key 池是另一份配置，开启池后不要仅修改单 Key 设置就假定 CRM 池已更新。池管理入口见下一节。
+
+### CRM：新建批次
+
+只有确需 CRM 补充时才操作。数据库账号需要读取公司、联系人、字段元数据；启用写入时还需公司字段更新权限，不能直接使用示例只读账号回填。
+
+```bash
+scripts/crm-enrichment snapshot \
+  --run-dir outputs/crm-enrichment/my-batch \
+  --crm-env /absolute/path/to/crm.env
+
+scripts/crm-enrichment start \
+  --run-dir outputs/crm-enrichment/my-batch \
+  --workers 2 --limit 5 --dry-run
+
+scripts/crm-enrichment status --run-dir outputs/crm-enrichment/my-batch
+```
+
+快照已有时不会重新覆盖。先看小批次的 `result.json`、`proposal.json` 和证据，待 worker 退出后再启用同一批次写入。确认要执行全量时：
+
+```bash
+scripts/crm-enrichment start \
+  --run-dir outputs/crm-enrichment/my-batch \
+  --workers 5 --limit 0 --apply
+```
+
+`--dry-run` 仍会消耗搜索和模型额度，只是不写 CRM。`apply` 子命令只处理已有提案/结果；`start --apply` 会继续背调并写入。CRM 并发范围 1–5，`--limit 0` 表示整个冻结清单。
+
+### CRM：接管已有批次
+
+先查状态。默认批次由本机 `outputs/crm-enrichment/latest.json` 指定；同时管理多个批次时，每条命令都应显式传 `--run-dir`。
+
+```bash
+scripts/crm-enrichment status
+scripts/crm-enrichment stop
+scripts/crm-enrichment status
+# 确认 running=false 后，按需要续跑
+scripts/crm-enrichment resume
+```
+
+`stop` 停止派发，等待在途公司完成后退出；`stopping` 不等于已停。`resume` 沿用保存的并发、范围和写入模式：此前 `--apply` 的批次续跑仍然写 CRM；此前 `--limit 5` 的批次不会自动变成全量。
+
+worker 是脱离终端的后台进程，有文件锁避免同一批次重复启动。macOS 使用 `caffeinate` 防止运行期间自动空闲睡眠；关机、合盖和断电仍会中断。项目没有开机自启。不同批次和不同机器之间没有全局锁，不能并行执行覆盖相同公司的写入队列。
+
+## CRM 数据规则
+
+| 条件 / 字段 | 当前处理规则 |
+| --- | --- |
+| 筛选范围 | 公司未删除、`source=ISALES`、公司不是 `WU_XIAO`；无未删除联系人，或所有未删除联系人均为 `NO_REPLY` / `NEW` |
+| 行业 `industry` | 仅补空值，只能使用 CRM 允许枚举；证据不足不硬填“其他” |
+| 星级 `rating` | 仅补空值；0–19→1 星，20–39→2 星，40–59→3 星，60–79→4 星，80–100→5 星 |
+| 背景 `background` | 保留原文；有实质新增或更正时追加带日期和来源的中文补充，空值直接填写 |
+| 有效背调低于 20 分 | `status=valid`、validator 通过、主体确认且分数 `<20`，将公司 `level` 标为 `WU_XIAO`；低分分支优先于字段回填 |
+| 失败 / 主体未确认 / 正好 20 分 | 不按低分标无效 |
+| 公司已为一/二级 | 不自动降级，记录冲突 |
+| 联系人一/二级 | `CUSTOMER`、`INQUIRY`、`QUALIFIED`、`NO_DEMAND` 转复核；其他非三级/空生命周期也不符合自动范围 |
+| 联系人生命周期 | 不连带修改；低公司匹配度不等于联系人失效 |
+| 写入保护 | 派发前重查范围，写前锁公司行并检查身份、字段、生命周期，UPDATE 再次核对范围 |
+
+**当前策略不删除公司或联系人。** `deletion*.json` 只保留历史审计，不可作为继续删除的指令。旧版确曾执行公司软删除，数据库其他流程可能随后物理清理；恢复不能仅凭软删除回执推断原行或关联仍存在。恢复需要完整备份、当前关联和合并回执共同核对，不能盲目重建已合并公司或覆盖后来转移的联系人。
+
+只读核查整个冻结清单（含已完成公司）：
+
+```bash
+scripts/crm-enrichment policy-review
+```
+
+它生成 `contact-policy-review.json`，列出无效公司和有二级及以上联系人的公司，统计联系人数量，不导出联系人姓名/邮箱。不会启动队列或写 CRM。详细字段保护、检查点及状态解释见 [CRM 操作说明](docs/crm-enrichment.md)。
+
+## AnySearch Key 池
+
+```bash
+scripts/crm-enrichment key-ui --port 54101
+```
+
+打开命令输出的网址。本机可用端口为 54101 时入口是 `http://127.0.0.1:54101/`；不指定端口则自动选择，实际值记录在批次 `key-ui.json`。首次使用需要已有批次及 CRM 配置。命令本身是前台页面服务；已有页面进程时返回其地址，不再开第二个。
+
+需要让页面脱离终端运行时：
+
+```bash
+mkdir -p outputs/service-logs
+nohup scripts/crm-enrichment key-ui --port 54101 \
+  > outputs/service-logs/key-ui.log 2>&1 < /dev/null &
+```
+
+- 最多 20 个 Key。“保存备用 Key”只保存；“保存并续跑”会按批次保存的写入模式启动。页面每 5 秒刷新，操作后立即刷新。
+- 当前 Key 明确额度耗尽后自动切换下一个可用 Key；全部耗尽才保存 STOP、暂停并通知。普通 429、超时、无结果或认证失败不会触发额度切换。
+- 首次启用池前要暂停 worker；池已启用时可以运行中追加 Key。充值后的 Key 需暂停后“恢复可用”，重复添加不会自动解除耗尽，也不猜测每日重置时间。
+- 池状态使用进程间文件锁、原子写入和 0600 权限。旧在途请求只影响其实际使用的 Key，不会误标新 Key。重新启动页面/worker 后保留状态。
+- 切换重试整个 CLI 命令；批次里已成功的查询可能重复请求。统计包含重试，不能用 CLI 次数或查询次数当作账单扣点。
+- 这是本项目内的请求切换层，不是通用 HTTP 代理，不自动注册或获取新 Key。只读查看脱敏状态可用 `scripts/crm-enrichment status` 或页面 `/status`，不要打印池文件。
+
+普通 CLI/API 显式接入同一池：
+
+```bash
+export ANYSEARCH_KEY_POOL_FILE="$PWD/config/anysearch-keys.json"
+```
+
+不设置时普通入口沿用原单 Key 行为；CRM worker 在池文件存在时自动设置。关闭页面不会停止 worker，页面显示的 Key“可用”是本地状态，不是远端余额实时查询。
+
+## 作为另一项目的模块
+
+保留完整目录，例如 `host-project/modules/company-research/`，不要只拷贝一个 Python 文件。必须包含 `company_research_trial/`、`skill/`、`config/hermes/`、依赖文件和脚本；`.agents/skills/aceler-company-research` 是仓库内相对符号链接，不要复制成指向旧机器的绝对链接。
+
+推荐从宿主用本模块自己的解释器和工作目录调用 JSON 接口，避免同名包冲突及宿主环境覆盖：
+
+```python
+import json
+import subprocess
+from pathlib import Path
+
+module_dir = Path("/absolute/path/host-project/modules/company-research")
+completed = subprocess.run(
+    [str(module_dir / ".venv/bin/python"),
+     "-m", "company_research_trial.research_api",
+     "--env-file", str(module_dir / "config/local.env")],
+    input=json.dumps({"name": "Hatria", "website": "https://hatria.com"}),
+    text=True, capture_output=True, cwd=module_dir, check=False,
+)
+if completed.returncode not in (0, 1, 2):
+    raise RuntimeError("背调子进程异常退出，请检查本机 stderr")
+result = json.loads(completed.stdout)
+```
+
+这是同步调用，宿主应提供足够长的总超时或放入自己的后台任务。示例默认继承宿主环境；集成前检查模型、代理和 Key 池环境变量，只传递确定需要的配置，不向网页或用户回传原始 stderr。Python 直接 import 也可，但需由宿主保证包可发现、Python 版本及依赖一致；本仓库没有提供可直接 `pip install -e .` 的打包配置。
+
+模块可独立背调，不需要启动 Twenty Hermes、联系人检索或 CRM 发信系统。使用 CRM 队列时才配置真实数据库与批次路径。
+
+## 日常维护
+
+### 每次开始或接管时
+
+1. `git status --short`、`git rev-parse HEAD`：确认版本及是否存在未提交改动。
+2. `scripts/crm-enrichment status`：同时看 `running/state`、`progress.updated_at`、`in_flight` 和暂停原因。PID 文件可能留有已结束进程，不能只看 PID 数字。
+3. 看 Key 页是否有可用 Key；单个 Key 耗尽并切换是正常事件，全部耗尽才需要补充额度。
+4. 核对当前批次 `settings.json` 的 workers、limit、apply。该文件含本机路径，不需要对外发送。
+
+### 运行期间与结束后
+
+| 检查项 | 看什么 | 如何处理 |
+| --- | --- | --- |
+| 进度 | `progress.json`、`worker.log`、在途公司审计更新时间 | 长任务未结束不等于卡死；结合进程和日志判断 |
+| 实际模型 | 新结果的 `usage.model/provider` 和 Agent usage | 保持 M3 / minimax-cn，漂移先暂停并定位配置 |
+| 低分处理 | `invalidation.json` 对应的 result、score、身份及写前范围 | 不符合新策略则停止派发，保留证据 |
+| 失败集中 | `error.json`、`proposal.json` 的 reason、原始模型/检索日志 | 技术故障和主体未确认分开处理，不人工改 valid |
+| 花费趋势 | `request-usage.json` 的 search/extract/CLI attempts | 含失败及切换重试；缺少早期计量的历史不能补算账单 |
+| 数据保护 | `apply.json`、写前字段、联系人范围 | 冲突跳过，不强制覆盖人工修改 |
+| 完成 | `complete` 及分项计数 | 表示本轮尝试结束，不表示每家补充成功 |
+
+`completed` 包含复核、冲突、失败和额度中断，不能当作实际写入数量。续跑会重新尝试技术失败，完成计数可能暂时降低。待复核结果通常保留检查点，不能把它们当技术失败循环重跑。
+
+本机 Codex 定时监控是仓库外配置，**不会随 Git 克隆迁移**。交接后如需监控，应另行配置周期与通知条件；正常推进保持安静，新异常、全部额度耗尽或批次完成才通知，用户暂停时不擅自续跑。监控不应为巡检增加付费背调。
+
+### 本地文件与保留原则
+
+| 路径 | 内容 | 是否随 Git 交付 |
+| --- | --- | --- |
+| `outputs/company-research-trial/` | 独立背调输入、结果、报告、模型和证据审计 | 否 |
+| `outputs/crm-enrichment/` | 当前/历史批次清单、进度、回执、恢复快照 | 否；本次当前队列不迁移 |
+| `outputs/anysearch-cache/` | 七天证据缓存 | 否；跨机器默认不会命中同一缓存 |
+| `config/local.env` | 本机服务配置及凭据 | 否 |
+| `config/anysearch-keys.json` | Key 池、耗尽状态与尝试计数 | 否 |
+| `~/.hermes/profiles/aceler-memory/` | 已安装 profile、完整业务记忆与密钥 | 否；外部运行依赖 |
+
+保留完整批次的 `snapshot.json`、`manifest.json`、`settings.json`、`records/` 和写入审计。只备份 `result.json` 不足以恢复队列；字段回填快照也不等于完整 CRM 数据库备份。定期检查磁盘空间，在确认保留范围和完成独立备份前不要清理原始证据、删除回执或恢复资料。
+
+## 更新、回退与迁移
+
+### 更新代码
+
+纯文档提交不要求停止当前队列。运行时变更先安排维护窗口：`stop`，等待 `running=false`，保留批次和配置，再在干净工作区更新对应分支。
+
+```bash
+git fetch origin
+git pull --ff-only
+bash scripts/verify-install.sh
+```
+
+有未提交改动时先核对并保存，不使用 `reset --hard`、强制 checkout 或覆盖安装解决分歧。更新后重启需要加载新代码的页面服务，再按原批次续跑。worker 的 `adapter_sha256` 可与 `scripts/crm_enrichment.py` 当前哈希对照；已经加载的进程不会因 Git 更新自动更换实现。
+
+提交前只暂存明确的源文件和文档，检查 `git diff --cached --name-only`、`git diff --cached`，确认没有队列、凭据或业务快照，再普通 push。不要 force push 当前工作分支。
+
+### 回退
+
+回退代码与恢复 CRM 数据是两件事。已有写入不会随 Git 回退撤销；需逐条依据旧值、实际写入和当前业务变更处理。不要退回仍执行低分软删除的旧版队列；保留当前数据保护规则。已合并公司、后来转移联系人、人工更新字段必须保留，不盲目执行历史恢复 SQL。
+
+### 迁移到另一台 Mac
+
+本次仅交接 Git 内容，现有队列留原机。若以后明确安排迁移正在运行的队列：先停原机并确认退出；另行安全传输完整批次和所需配置，不通过 Git 或普通聊天发送；重建 `.venv`，安装本机 Hermes/AnySearch，更新 `settings.json.crm_env` 和 `latest.json.run_dir` 等绝对路径。保留冻结快照及其哈希、CRM 目标指纹，不通过编辑它们绕过校验。旧 PID、页面端口信息不是新机运行状态。
+
+移机后先离线验收，再核查实际输入、模型、Key 来源、代理、缓存与页面证据。另一台 Mac 全流程有效率下降不一定是评分变差：本项目有本机抓取、AnySearch 提取、缓存及失败恢复，逐层区分。具体步骤见 [安装文档的跨 Mac 排查](INSTALL-CODEX.md#同一测试集在另一台-mac-检索失败增多)。
+
+## 故障处理
+
+| 现象 | 先查 | 处理 |
+| --- | --- | --- |
+| 全部 Key 额度耗尽 | `quota-alert.json`、脱敏池状态 | 页面添加备用 Key，或充值后恢复可用，再续跑；不要自动解除已知耗尽状态 |
+| Key 页无法打开 / 端口占用 | `key-ui.json`、对应进程、`lsof -nP -iTCP:54101 -sTCP:LISTEN` | 确认旧页面进程身份；用空闲端口启动，勿误停其他服务 |
+| `Invalid port: ':1'` | 子进程继承的 NO_PROXY/no_proxy | 当前版本已将 IPv6 `/128` 单地址范围等价规范化；核对是否加载新代码，不必因此换 Key |
+| `AnySearch CLI unavailable` | 固定 CLI 路径、Node、安装哈希 | 按 INSTALL-CODEX 恢复固定版本，不替换为未经验证的 CLI |
+| `Hermes executable is unavailable` | `~/.local/bin/aceler-memory` | 按安装文档生成 profile 包装命令 |
+| 模型认证错误 | profile `.env` 中变量是否非空、实际 provider | 在本机修复对应凭据，不打印值；不要改评分规则 |
+| 连续 10 个技术失败暂停 | `worker.log`、`error.json`、模型和翻译审计 | 先查共享故障，修复后续跑；未确认主体仍属失败 |
+| 无可信页面 / 主体未确认 | input-records、anysearch-meta、证据链接、代理与缓存 | 保留原始结果，对齐输入后比较，不将关联主体直接视为目标 |
+| 中文翻译 / 字段适配未通过 | `proposal.json` 和模型输出 | 队列拒绝回填；核心 valid 与 CRM 写入成功是不同状态 |
+| `CRM target changed` / 快照哈希变化 | 配置来源、manifest、snapshot | 查错库、错误批次或被修改文件，不重写指纹放行 |
+| Level / 身份 / 字段冲突 | 各公司 `apply.json` / `invalidation.json` | 人工复核，不能自动覆盖 |
+| `interrupted` / 旧 PID 仍在文件中 | 文件锁、实际进程、日志、检查点 | 确认没有在途旧 worker 后 resume，不直接删除锁文件 |
+| 无 CRM 配置启动失败 | 是否误用无参数抽样入口 | 选择 JSON API 或 `--selected-file` |
+
+实际网络路由可能受 macOS 系统代理影响，不能只看终端 HTTP_PROXY。不要复制另一台机器的代理端口。缺少底层日志时，不凭最终“未找到可信证据”一句话断定网络、Key 或模型故障。
+
+## 验收与指标
+
+基础验收用 `bash scripts/verify-install.sh`。只运行代码测试时必须显式列模块；本项目存在同名模块/包，避免直接用 `unittest discover`：
 
 ```bash
 .venv/bin/python -m unittest \
@@ -130,34 +384,46 @@ Validator 只硬校验 JSON 结构、合法枚举与范围、固定产品目录�
   company_research_trial.test_orchestration \
   company_research_trial.test_structured_evidence \
   company_research_trial.test_structured_evidence_pilot \
-  company_research_trial.test_semantic_decision_validation
-.venv/bin/python -m py_compile company_research_trial/company_research_trial.py company_research_trial/agent_contracts.py company_research_trial/orchestration.py company_research_trial/structured_evidence.py company_research_trial/dashboard.py company_research_trial/research_api.py scripts/semantic_decision_validation.py
+  company_research_trial.test_semantic_decision_validation \
+  company_research_trial.test_crm_enrichment \
+  company_research_trial.test_anysearch_key_pool
+
+.venv/bin/python skill/aceler-company-research/scripts/validate_assessment.py --self-test
 ```
 
-## 本地看板：结果只读 + 单家公司背调
+2026-09-11 Key 池版本通过上述 168 项测试；自动切换测试模拟额度响应，不代表已经真实耗尽每个备用 Key。真实上线是否发生切换，应看脱敏池状态和实际请求记录，不以页面可打开代替证明。
 
-```bash
-.venv/bin/python -m company_research_trial.dashboard
-```
+评估以人工“跟进 / 不跟进”与模型 `match.follow_up` 对照：
 
-默认监听 `0.0.0.0:8766`，可以通过启动时显示的当前局域网 IP 和端口访问。看板只读扫描本地 `result.json`，直接读取 validator 生成的 `score` 与 `level`。
-看板采用左侧公司队列、右侧研究详情的并排审阅布局；结果区保持只读，“新建背调”抽屉可以提交一家公司。公司名必填，官网和 LinkedIn 可选，提交内容只包含 `name`、`website`、`linkedin_url` 三个字段，不读取或写入 CRM。一次只允许一个手工背调任务，完成后自动刷新并打开新的运行批次；CLI 返回失败状态但已生成合法结果时，失败结果仍可在看板查看。
+- 召回率 = TP / 全部人工正例，含不可评分的人工正例在分母中。
+- 精确率 = TP / (TP + FP)。
+- 准确率 = (TP + TN) / 全测试集数量，失败不会从分母删除。
+- 有效率 = valid / 总数，衡量完成情况，不能当作准确率或 AnySearch API 成功率。
 
-AnySearch key 可通过仅限本机的设置接口更换；接口只返回尾 4 位掩码，完整 key 不会出现在响应中：
+| 历史验收 | 有效结果 | 召回率 | 精确率 | 准确率 | 解释 |
+| --- | --- | --- | --- | --- | --- |
+| 2026-09-04 固定证据 100 家 | 100/100 | 91.07% | 82.26% | 84.00% | 语义 A/B，未重新实时检索 |
+| 2026-09-07 100-4 实时全流程 | 100/100 | 88.57% | 80.52% | 77.00% | 人工正/负例 70/30 |
+| 2026-09-07 100-3 原流程 | 98/100 | 83.93% | 83.93% | 81.00% | 含缓存和本机页面抓取，失败未补跑替换 |
+| 2026-09-10 官网优先试验 | 20/20 | 80%→70% | 80%→87.5% | 80%→80% | 请求 132→134，未推广 |
 
-```bash
-curl http://127.0.0.1:8766/api/settings/anysearch
-curl -X POST http://127.0.0.1:8766/api/settings/anysearch \
-  -H 'Content-Type: application/json' \
-  -d '{"api_key":"替换为新的-key"}'
-```
+当前保留原检索路线，不能自动启用已撤回的官网优先试验。历史质量门槛为召回率 >80%、精确率 ≥75%；不同样本和证据方式不可直接互换。未标注 CRM 队列不能用于宣称当前准确率。完整角色编排、评分细则、回放限制和历史证据说明见 [背调链路与历史验收](docs/research-behavior.md)。
 
-更新会原子写入 `config/local.env` 并刷新看板进程环境；之后新启动的背调任务使用新 key，已在运行的独立批次不会被中途切换。
+## 代码和文档导航
 
-只需要限制为本机访问时，显式监听回环接口：
+| 位置 | 责任 |
+| --- | --- |
+| [INSTALL-CODEX.md](INSTALL-CODEX.md) | 固定依赖、完整 profile 安装、联网冒烟、跨 Mac 自检 |
+| [docs/crm-enrichment.md](docs/crm-enrichment.md) | 队列操作、字段规则、检查点、Key 池 |
+| [docs/research-behavior.md](docs/research-behavior.md) | 检索/Agent/validator 边界与历史实验 |
+| `company_research_trial/company_research_trial.py` | 生产检索、证据、模型调用、校验和报告 |
+| `research_api.py` / `dashboard.py` | 来源中立单公司接口 / 结果看板 |
+| `orchestration.py` / `agent_contracts.py` | Evidence → Router → Lead → Recall → Arbiter 编排与数据契约 |
+| `anysearch_key_pool.py` / `anysearch_bridge.js` | 持久化 Key 切换 / 保留调用方 Key 优先级的 Node 包装 |
+| `scripts/crm_enrichment.py` | 冻结清单、实时范围检查、写入、后台运行、页面 |
+| `scripts/semantic_decision_validation.py` | 人工标注测试集评估 |
+| `scripts/verify-install.sh` | 离线安装与回归验收 |
+| `skill/aceler-company-research/` | 仓库固定 Skill、26 项产品目录和 validator |
+| `config/hermes/aceler-memory/` | 通用业务记忆与 profile 模板，不含运行密钥 |
 
-```bash
-.venv/bin/python -m company_research_trial.dashboard --host 127.0.0.1 --port 8766
-```
-
-默认的 `0.0.0.0` 会向当前网络暴露看板；建议仅在可信局域网中使用。AnySearch Key 设置接口仍只允许本机回环请求。
+接手顺序：核对提交和运行范围 → 安装外部依赖 → 离线验收 → 一家公司联网验证 → 明确选择独立背调或 CRM 批次。不要通过修改 Skill、降低身份门槛、改人工标签或覆盖历史结果让验收“通过”。

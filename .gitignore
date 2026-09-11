@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 config/local.env
+config/anysearch-keys.json
+config/anysearch-keys.json.lock
+config/.anysearch-keys.json*
 inputs/
 outputs/
 .venv/

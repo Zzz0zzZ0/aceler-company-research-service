@@ -31,14 +31,18 @@ from company_research_trial.dashboard import (
     DashboardHandler, _MAX_SETTINGS_BODY, _ResearchInputError, _parse_anysearch_key,
     _read_anysearch_key, _read_json_payload, _write_anysearch_key,
 )
+from company_research_trial import anysearch_key_pool
 
 FIELDS = ("background", "industry", "rating")
 ADAPTER_VERSION = 3
 LATEST = ROOT / "outputs" / "crm-enrichment" / "latest.json"
 SEED_FIELDS = ("name", "website", "linkedin_url", "country")
 ELIGIBLE = '''c."deletedAt" IS NULL AND c.source::text='ISALES'
+AND c.level::text IS DISTINCT FROM 'WU_XIAO'
 AND NOT EXISTS(SELECT 1 FROM {s}.person p WHERE p."companyId"=c.id AND p."deletedAt" IS NULL
 AND (p."lifeCycle" IS NULL OR p."lifeCycle"::text NOT IN ('NO_REPLY','NEW')))'''
+HIGHER_CONTACT = '''EXISTS(SELECT 1 FROM {s}.person p WHERE p."companyId"=c.id
+AND p."deletedAt" IS NULL AND p."lifeCycle"::text IN ('CUSTOMER','INQUIRY','QUALIFIED','NO_DEMAND'))'''
 SELECT_FIELDS = '''c.id::text,c.name,c."domainNamePrimaryLinkUrl" AS website,
 c."linkedinLinkPrimaryLinkUrl" AS linkedin_url,c."addressAddressCountry" AS country,
 c.background,c.industry::text,c.rating::text,c."updatedAt"::text AS updated_at'''
@@ -46,6 +50,10 @@ c.background,c.industry::text,c.rating::text,c."updatedAt"::text AS updated_at''
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def key_pool_file():
+    return DEFAULT_ENV_FILE.with_name("anysearch-keys.json")
 
 
 def save(path, value):
@@ -112,7 +120,7 @@ def snapshot(run):
         "policy": "background: retain original and append verified new facts when useful; industry/rating: fill empty only",
         "adapter_version": ADAPTER_VERSION,
         "rating_bands": "0-19=1,20-39=2,40-59=3,60-79=4,80-100=5",
-        "scope": "company.source=ISALES; no contacts or every undeleted contact lifecycle in NO_REPLY/NEW",
+        "scope": "company.source=ISALES; company.level is not WU_XIAO; no contacts or every undeleted contact lifecycle in NO_REPLY/NEW",
     })
     save(LATEST, {"run_dir": str(run)})
     print(json.dumps({"snapshot": str(run), "companies": len(rows)}, ensure_ascii=False), flush=True)
@@ -134,6 +142,57 @@ def low_fit(item):
     return (item.get("status") == "valid" and validation.get("valid") is True
             and (item.get("assessment") or {}).get("identity_status") == "confirmed"
             and not isinstance(score, bool) and isinstance(score, (int, float)) and 0 <= score < 20)
+
+
+def automation_gate(row, index, run):
+    """Recheck frozen queue entries before research; never change contact lifecycle."""
+    with crm_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("BEGIN READ ONLY")
+        cursor.execute("SET LOCAL statement_timeout = '30s'")
+        cursor.execute(statement('SELECT c.level::text, (' + HIGHER_CONTACT + '), (' + ELIGIBLE +
+                                 ') FROM {s}.company c WHERE c.id=%s'), (row["id"],))
+        current = cursor.fetchone()
+    status = None
+    if not current:
+        status = "no_longer_eligible"
+    elif current[1]:
+        status = "review_higher_tier_contacts"
+    elif current[0] == "WU_XIAO":
+        status = "blocked_invalid_company"
+    elif not current[2]:
+        status = "no_longer_eligible"
+    save(run / "records" / f"{index:03d}-{row['id']}" / "automation-gate.json",
+         {"id": row["id"], "at": now(), "status": status or "allowed", "contacts_changed": False})
+    return status
+
+
+def policy_review(run, rows):
+    """Read-only audit includes completed entries which queue resumption skips."""
+    with crm_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("BEGIN READ ONLY")
+        cursor.execute("SET LOCAL statement_timeout = '30s'")
+        cursor.execute(statement('''SELECT c.id::text,c.name,c.level::text,
+            count(p.id) AS contacts,
+            count(p.id) FILTER (WHERE p."lifeCycle"::text IN
+                ('CUSTOMER','INQUIRY','QUALIFIED','NO_DEMAND')) AS higher_tier_contacts
+            FROM {s}.company c LEFT JOIN {s}.person p
+            ON p."companyId"=c.id AND p."deletedAt" IS NULL
+            WHERE c.id=ANY(%s::uuid[]) AND c."deletedAt" IS NULL
+            GROUP BY c.id HAVING c.level::text='WU_XIAO' OR
+                count(p.id) FILTER (WHERE p."lifeCycle"::text IN
+                ('CUSTOMER','INQUIRY','QUALIFIED','NO_DEMAND')) > 0
+            ORDER BY c.id'''), ([row["id"] for row in rows],))
+        columns = [column.name for column in cursor.description]
+        companies = [dict(zip(columns, values)) for values in cursor.fetchall()]
+    result = {"at": now(), "scope": "saved batch", "contacts_changed": False,
+              "invalid_companies": sum(row["level"] == "WU_XIAO" for row in companies),
+              "manual_review": [row for row in companies if row["higher_tier_contacts"]],
+              "blocked_companies": companies}
+    save(run / "contact-policy-review.json", result)
+    print(json.dumps({"invalid_companies": result["invalid_companies"],
+                      "manual_review_companies": len(result["manual_review"]),
+                      "report": str(run / "contact-policy-review.json")}, ensure_ascii=False))
+    return result
 
 
 def updates(row, decision, background, score):
@@ -274,10 +333,12 @@ def apply_one(row, index, run, manifest, proposal):
         save(directory / "write-intent.json", audit)
         with crm_connection() as connection, connection.cursor() as cursor:
             cursor.execute("SET LOCAL statement_timeout = '30s'")
-            cursor.execute(statement("SELECT " + SELECT_FIELDS + ", (" + ELIGIBLE + ") AS eligible FROM {s}.company c WHERE c.id=%s FOR UPDATE OF c"), (row["id"],))
+            cursor.execute(statement("SELECT " + SELECT_FIELDS + ", (" + ELIGIBLE + ') AS eligible, (' + HIGHER_CONTACT + ") AS higher_tier_contacts FROM {s}.company c WHERE c.id=%s FOR UPDATE OF c"), (row["id"],))
             values = cursor.fetchone()
             current = dict(zip([column.name for column in cursor.description], values)) if values else None
-            if not current or not current["eligible"]:
+            if current and current["higher_tier_contacts"]:
+                audit["status"] = "review_higher_tier_contacts"
+            elif not current or not current["eligible"]:
                 audit["status"] = "no_longer_eligible"
             elif any(current[key] != row[key] for key in SEED_FIELDS):
                 audit["status"] = "identity_changed"
@@ -303,51 +364,57 @@ def apply_one(row, index, run, manifest, proposal):
     return audit
 
 
-def delete_low_fit(row, index, run):
+def invalidate_low_fit(row, index, run):
     directory = run / "records" / f"{index:03d}-{row['id']}"
-    audit_path = directory / "deletion.json"
+    audit_path = directory / "invalidation.json"
     if audit_path.is_file():
         return read(audit_path)
     item = read(directory / "result.json")
     if not low_fit(item) or (item.get("record") or {}).get("id") != row["id"]:
-        raise ValueError("Deletion requires valid, confirmed research with score below 20")
+        raise ValueError("Invalidation requires valid, confirmed research with score below 20")
     expected = dict(row)
     if (directory / "apply.json").is_file():
         applied = read(directory / "apply.json")
         if applied["status"] in {"applied", "already_applied"}:
             expected.update(applied["after"])
-    intent_path = directory / "deletion-intent.json"
+    intent_path = directory / "invalidation-intent.json"
     intent = read(intent_path) if intent_path.exists() else None
     audit = {"id": row["id"], "at": now(), "score": item["validation"]["score"],
              "result_sha256": hashlib.sha256((directory / "result.json").read_bytes()).hexdigest(),
-             "operation": "soft_delete_company", "contacts_changed": False}
+             "operation": "set_company_invalid", "contacts_changed": False}
     with crm_connection() as connection, connection.cursor() as cursor:
         cursor.execute("SET LOCAL statement_timeout = '30s'")
-        cursor.execute(statement("SELECT " + SELECT_FIELDS + ', c."deletedAt"::text AS deleted_at, (' + ELIGIBLE + ") AS eligible FROM {s}.company c WHERE c.id=%s FOR UPDATE OF c"), (row["id"],))
+        cursor.execute(statement("SELECT " + SELECT_FIELDS + ', c.level::text AS level, c."deletedAt"::text AS deleted_at, (' + ELIGIBLE + ') AS eligible, (' + HIGHER_CONTACT + ") AS higher_tier_contacts FROM {s}.company c WHERE c.id=%s FOR UPDATE OF c"), (row["id"],))
         values = cursor.fetchone()
         current = dict(zip([column.name for column in cursor.description], values)) if values else None
-        if current and intent and current["deleted_at"] == intent["deleted_at"]:
-            audit.update({"status": "already_deleted_low_fit", "before": intent["before"], "deleted_at": current["deleted_at"]})
+        if current and current["higher_tier_contacts"]:
+            audit["status"] = "review_higher_tier_contacts"
+        elif (current and intent and current["level"] == "WU_XIAO" and current["deleted_at"] is None
+                and current["updated_at"] == intent["invalidated_at"]):
+            audit.update({"status": "already_invalid_low_fit", "before": intent["before"], "invalidated_at": current["updated_at"]})
+        elif current and current["level"] == "WU_XIAO" and current["deleted_at"] is None:
+            audit["status"] = "already_invalid_low_fit"
         elif not current or not current["eligible"]:
-            audit["status"] = "deletion_scope_changed"
+            audit["status"] = "invalidation_scope_changed"
         elif any(current[key] != row[key] for key in SEED_FIELDS):
-            audit["status"] = "deletion_identity_changed"
+            audit["status"] = "invalidation_identity_changed"
+        elif current["level"] not in (None, "SAN_JI"):
+            audit["status"] = "invalidation_level_conflict"
         elif any(current[key] != expected[key] for key in FIELDS):
-            audit["status"] = "deletion_conflict"
+            audit["status"] = "invalidation_conflict"
         else:
-            # A DB-generated timestamp makes recovery distinguish our deletion from another actor's.
             cursor.execute("SELECT clock_timestamp()::text")
-            deleted_at = cursor.fetchone()[0]
-            audit.update({"before": current, "deleted_at": deleted_at})
+            invalidated_at = cursor.fetchone()[0]
+            audit.update({"before": current, "invalidated_at": invalidated_at})
             save(intent_path, audit)
-            cursor.execute(statement('UPDATE {s}.company c SET "deletedAt"=%s::timestamptz, "updatedAt"=now() WHERE c.id=%s AND ' + ELIGIBLE + ' RETURNING c."deletedAt"::text'), (deleted_at, row["id"]))
+            cursor.execute(statement("UPDATE {s}.company c SET level='WU_XIAO', \"updatedAt\"=%s::timestamptz WHERE c.id=%s AND " + ELIGIBLE + ' RETURNING c."updatedAt"::text'), (invalidated_at, row["id"]))
             returned = cursor.fetchone()
             if returned is None:
-                audit["status"] = "deletion_scope_changed"
-            elif returned[0] != deleted_at:
-                raise RuntimeError("CRM deletion timestamp differs from intent")
+                audit["status"] = "invalidation_scope_changed"
+            elif returned[0] != invalidated_at:
+                raise RuntimeError("CRM invalidation timestamp differs from intent")
             else:
-                audit["status"] = "deleted_low_fit"
+                audit["status"] = "invalidated_low_fit"
     save(audit_path, audit)
     return audit
 
@@ -373,9 +440,12 @@ def run_queue(run, manifest, rows, workers, limit, apply, apply_only):
     def work(index, row):
         audit = run / "records" / f"{index:03d}-{row['id']}" / "apply.json"
         try:
+            blocked = automation_gate(row, index, run)
+            if blocked:
+                return blocked
             result_path = audit.with_name("result.json")
             if result_path.is_file() and low_fit(read(result_path)):
-                return delete_low_fit(row, index, run)["status"] if apply else "low_fit"
+                return invalidate_low_fit(row, index, run)["status"] if apply else "low_fit"
             if audit.is_file():
                 return read(audit)["status"]
             if apply_only:
@@ -386,7 +456,7 @@ def run_queue(run, manifest, rows, workers, limit, apply, apply_only):
             else:
                 proposal = prepare(row, index, run, manifest)
             if proposal["status"] == "low_fit":
-                return delete_low_fit(row, index, run)["status"] if apply else "low_fit"
+                return invalidate_low_fit(row, index, run)["status"] if apply else "low_fit"
             if proposal["status"] != "ready":
                 return proposal["status"]
             return apply_one(row, index, run, manifest, proposal)["status"] if apply else "ready"
@@ -401,7 +471,9 @@ def run_queue(run, manifest, rows, workers, limit, apply, apply_only):
     remaining = []
     for index, row in selected:
         directory = run / "records" / f"{index:03d}-{row['id']}"
-        if (directory / "deletion.json").is_file():
+        if (directory / "invalidation.json").is_file():
+            counts[read(directory / "invalidation.json")["status"]] += 1
+        elif (directory / "deletion.json").is_file():
             counts[read(directory / "deletion.json")["status"]] += 1
         elif (directory / "result.json").is_file() and low_fit(read(directory / "result.json")):
             if apply:
@@ -470,10 +542,17 @@ def status(run, *, emit=True):
         phase = "interrupted"
     result = {"run_dir": str(run), "running": running, "state": phase, "pid": state.get("pid"),
         "progress": progress, "log": str(run / "worker.log")}
+    result["key_pool"] = anysearch_key_pool.public_status(key_pool_file())
     if (run / "quota-alert.json").is_file():
         result["alert"] = read(run / "quota-alert.json")
     if (run / "optimization-review.json").is_file():
         result["optimization_review"] = read(run / "optimization-review.json")
+    if (run / "restoration-review.json").is_file():
+        result["restoration_review"] = read(run / "restoration-review.json")
+    if (run / "contact-policy-review.json").is_file():
+        policy = read(run / "contact-policy-review.json")
+        result["contact_policy"] = {"at": policy["at"], "invalid_companies": policy["invalid_companies"],
+                                    "manual_review_companies": len(policy["manual_review"])}
     if emit:
         print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return result
@@ -489,7 +568,13 @@ def start(run, settings, *, anysearch_key=None):
         if anysearch_key is not None:
             anysearch_key = _parse_anysearch_key({"api_key": anysearch_key})
             _write_anysearch_key(DEFAULT_ENV_FILE, anysearch_key)
+            if key_pool_file().exists():
+                anysearch_key_pool.add_keys(key_pool_file(), [anysearch_key])
+                anysearch_key_pool.change_key(key_pool_file(), hashlib.sha256(anysearch_key.encode()).hexdigest()[:16], "reset")
             save(run / "key-update.json", {"at": now(), "saved": True})
+        pool = anysearch_key_pool.public_status(key_pool_file())
+        if pool["configured"] and not pool["available"]:
+            raise ValueError("Key 池已全部耗尽，请在本机页面添加备用 Key，或充值后手动恢复已有 Key")
         if (run / "quota-alert.json").is_file():
             save(run / "alerts" / (str(time.time_ns()) + ".json"), read(run / "quota-alert.json"))
             (run / "quota-alert.json").unlink()
@@ -518,23 +603,28 @@ def start(run, settings, *, anysearch_key=None):
         return status(run)
 
 
-KEY_UI_HTML = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>CRM 背调 · 更换 Key</title>
-<style>body{font:16px/1.65 -apple-system,BlinkMacSystemFont,sans-serif;background:#f4f6f8;color:#17232e;margin:0;padding:40px 20px}main{max-width:620px;margin:auto;background:white;padding:32px;border-radius:16px}h1{font-size:25px}input,button{font:inherit;box-sizing:border-box;width:100%;padding:12px;border:1px solid #b6c2cb;border-radius:8px}button{margin-top:14px;background:#174e70;color:white;cursor:pointer}button:disabled{opacity:.5}pre{white-space:pre-wrap;background:#f4f6f8;padding:16px;border-radius:8px}small{color:#536572}#message{min-height:30px}</style>
-<main><h1>更换 AnySearch Key 并续跑</h1><p>保存新 Key 后，自动从现有检查点继续 CRM 背调。</p>
-<form id="form"><label for="key">新的 AnySearch API Key</label><input id="key" type="password" required minlength="8" maxlength="512" autocomplete="new-password" spellcheck="false"><button id="submit">保存 Key 并续跑</button></form>
-<p id="message" role="status"></p><small>Key 仅保存在本机配置中，不回显。正在运行时请先停止任务，再更换 Key。</small>
-<h2>当前进度</h2><pre id="progress">读取中…</pre></main>
+KEY_UI_HTML = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AnySearch Key 自动切换</title>
+<style>body{font:16px/1.6 -apple-system,BlinkMacSystemFont,sans-serif;background:#f4f6f8;color:#17232e;margin:0;padding:32px 20px}main{max-width:760px;margin:auto;background:white;padding:30px;border-radius:16px}h1{font-size:25px}input,button{font:inherit;padding:10px;border:1px solid #b6c2cb;border-radius:8px}input{box-sizing:border-box;width:100%;margin:5px 0}button{cursor:pointer;background:#174e70;color:white;margin:5px 6px 5px 0}button:disabled{opacity:.5;cursor:default}.secondary{background:white;color:#174e70}pre{white-space:pre-wrap;background:#f4f6f8;padding:16px;border-radius:8px}small{color:#536572}table{width:100%;border-collapse:collapse}td,th{text-align:left;border-bottom:1px solid #ddd;padding:8px}#message{min-height:28px}#pool-wrap{overflow:auto}</style>
+<main><h1>AnySearch Key 自动切换</h1><p>按顺序使用可用 Key；明确额度耗尽时自动切换，全部耗尽才暂停。联系人与背调规则保持不变。</p>
+<h2>备用 Key</h2><form id="form"><div id="inputs"></div><button type="button" class="secondary" id="add">再添加一个</button><br><button type="submit">保存备用 Key</button><button type="button" id="save-run">保存并续跑</button></form>
+<small>仅保存在本机，输入不会回显。重复添加不会重置耗尽状态；充值后请暂停队列，再点击“恢复可用”。最多 20 个 Key。</small>
+<p id="message" role="status" aria-live="polite"></p><div id="pool-wrap"><table><thead><tr><th>Key</th><th>状态</th><th>CLI 尝试</th><th>操作</th></tr></thead><tbody id="keys"></tbody></table></div>
+<h2>队列</h2><button id="resume" type="button">继续运行</button><button id="stop" class="secondary" type="button">暂停队列</button><pre id="progress">读取中…</pre>
+<small>CLI 尝试包含失败和切换重试，不等于查询条数或账单扣点。暂停会等待在途任务完成。</small></main>
 <script>
-const form=document.getElementById('form'),key=document.getElementById('key'),button=document.getElementById('submit'),message=document.getElementById('message');
-const labels={applied:'已补充信息',deleted_low_fit:'低相关度已软删除',already_deleted_low_fit:'已确认此前删除',review:'待复核',failed:'技术失败',deletion_scope_changed:'删除前范围变化',quota_exhausted:'额度耗尽中断'};
-async function refresh(){try{const r=await fetch('/status');const s=await r.json(),p=s.progress||{};document.getElementById('progress').textContent=[`状态：${s.running?'后台运行中':s.state==='paused'?'已暂停':s.state}`,`本轮已处理：${p.completed||0} / ${p.total||0}`,...Object.entries(p.counts||{}).map(([k,v])=>`${labels[k]||k}：${v}`),s.alert?.message||''].filter(Boolean).join('\n')}catch{document.getElementById('progress').textContent='本机接口暂时不可用，请重新运行 key-ui 命令。'}}
-form.addEventListener('submit',async e=>{e.preventDefault();button.disabled=true;message.textContent='正在保存并启动…';const payload=JSON.stringify({api_key:key.value});key.value='';try{const r=await fetch('/key-and-resume',{method:'POST',headers:{'Content-Type':'application/json'},body:payload});const s=await r.json();message.textContent=r.ok?(s.running?'Key 已保存，后台队列已启动。':'Key 已保存，请查看下方任务状态。'):(s.message||'操作失败，请查看本机日志。');await refresh()}catch{message.textContent='接口响应中断，请先查看状态，确认是否已启动。'}finally{button.disabled=false}});
-refresh();setInterval(refresh,5000);
-</script></html>'''
+const $=id=>document.getElementById(id);let busy=false;
+function addInput(){if($('inputs').children.length>=20)return;const input=document.createElement('input');input.type='password';input.minLength=8;input.maxLength=512;input.autocomplete='new-password';input.spellcheck=false;input.placeholder='AnySearch API Key';input.setAttribute('aria-label','AnySearch API Key '+($('inputs').children.length+1));$('inputs').append(input)}addInput();
+const labels={merged_source_retained:'已保留合并后的公司',deletion_scope_changed:'历史删除前范围变化',no_longer_eligible:'已不符合范围',already_applied:'已确认写入',deletion_conflict:'历史删除前字段冲突',identity_changed:'公司身份已变化',conflict:'字段存在冲突',deletion_identity_changed:'历史删除前身份变化',invalidation_identity_changed:'标无效前身份变化',invalidation_conflict:'标无效前字段冲突',invalidation_level_conflict:'公司生命周期需复核',invalidation_scope_changed:'标无效前范围变化',unchanged:'信息保持原样',invalidated_low_fit:'低相关度已标无效',already_invalid_low_fit:'已为无效',applied:'已补充',review:'待复核',failed:'技术失败',quota_exhausted:'额度耗尽中断',blocked_invalid_company:'无效公司已拦截',review_higher_tier_contacts:'二级及以上联系人待复核'};
+async function refresh(){try{const r=await fetch('/status');if(!r.ok)throw Error();const s=await r.json(),p=s.progress||{},pool=s.key_pool||{};$('progress').textContent=[`状态：${s.state==='stopping'?'正在暂停':s.running?'后台运行中':s.state==='paused'?'已暂停':s.state}`,`本轮已处理：${p.completed||0} / ${p.total||0}`,`可用 Key：${pool.available||0}`,...Object.entries(p.counts||{}).map(([k,v])=>`${labels[k]||k}：${v}`),s.alert?.message||''].filter(Boolean).join('\n');$('keys').replaceChildren();for(const key of pool.keys||[]){const tr=document.createElement('tr');for(const text of [key.masked,key.status==='exhausted'?'额度耗尽':key.active?'当前使用':'备用',String(key.attempts)]){const td=document.createElement('td');td.textContent=text;tr.append(td)}const ops=document.createElement('td');for(const [action,label] of [['reset','恢复可用'],['remove','移除']]){const b=document.createElement('button');b.type='button';b.className='secondary';b.textContent=label;b.disabled=s.running||busy;b.onclick=()=>call('/pool-key',{id:key.id,action},'Key 状态已更新');ops.append(b)}tr.append(ops);$('keys').append(tr)}$('resume').disabled=busy||s.running||!pool.available;$('stop').disabled=busy||!s.running}catch{$('progress').textContent='本机接口暂时不可用，请检查 key-ui 服务。'}}
+async function call(path,payload,success){if(busy)return;busy=true;$('message').textContent='处理中…';try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const s=await r.json();$('message').textContent=r.ok?success:(s.message||'操作未完成')}catch{$('message').textContent='响应中断，请先查看状态，避免重复操作。'}finally{busy=false;await refresh()}}
+function save(resume){const api_keys=[...$('inputs').querySelectorAll('input')].map(i=>i.value.trim()).filter(Boolean);if(!api_keys.length){$('message').textContent='请至少输入一个 Key';return}for(const input of $('inputs').querySelectorAll('input'))input.value='';return call(resume?'/pool-and-resume':'/pool-add',{api_keys},resume?'Key 已保存，队列已收到续跑请求。':'备用 Key 已保存。')}
+$('form').onsubmit=e=>{e.preventDefault();save(false)};$('save-run').onclick=()=>{if($('form').reportValidity())save(true)};$('add').onclick=addInput;$('resume').onclick=()=>call('/queue-start',{},'队列已收到续跑请求。');$('stop').onclick=()=>call('/queue-stop',{},'已停止派发，等待在途任务完成。');refresh();setInterval(refresh,5000);
+</script></html>
+'''
 
 
-def key_ui_server(run, settings):
+def key_ui_server(run, settings, port=0):
     class KeyHandler(DashboardHandler):
         def allowed(self, post=False):
             expected = f"127.0.0.1:{self.server.server_port}"
@@ -552,15 +642,44 @@ def key_ui_server(run, settings):
                 self._json(HTTPStatus.NOT_FOUND, {"message": "未找到接口"})
 
         def do_POST(self):
-            if not self.allowed(post=True) or self.path != "/key-and-resume":
+            if not self.allowed(post=True) or self.path not in {"/key-and-resume", "/pool-add", "/pool-and-resume", "/pool-key", "/queue-start", "/queue-stop"}:
                 self._json(HTTPStatus.FORBIDDEN, {"message": "仅允许从本机页面提交"})
                 return
             try:
-                key = _parse_anysearch_key(_read_json_payload(self, _MAX_SETTINGS_BODY))
+                payload = _read_json_payload(self, max(_MAX_SETTINGS_BODY, 16_384))
                 if read(run / "manifest.json")["target"] != target():
                     raise ValueError("CRM 目标发生变化，未更换 Key 或启动任务")
                 current_settings = read(run / "settings.json") if (run / "settings.json").is_file() else settings
-                result = start(run, current_settings, anysearch_key=key)
+                if self.path == "/key-and-resume":
+                    result = start(run, current_settings, anysearch_key=_parse_anysearch_key(payload))
+                elif self.path in {"/pool-add", "/pool-and-resume"}:
+                    if not isinstance(payload, dict) or set(payload) != {"api_keys"}:
+                        raise ValueError("请求只接受 api_keys 列表")
+                    with (run / "control.lock").open("a") as control:
+                        fcntl.flock(control, fcntl.LOCK_EX)
+                        # A pool must be configured before a worker starts using it.
+                        if locked(run) and not key_pool_file().exists():
+                            raise ValueError("首次启用 Key 池前请先暂停队列")
+                        anysearch_key_pool.add_keys(key_pool_file(), payload["api_keys"])
+                    result = start(run, current_settings) if self.path == "/pool-and-resume" else status(run, emit=False)
+                elif self.path == "/pool-key":
+                    if not isinstance(payload, dict) or set(payload) != {"id", "action"}:
+                        raise ValueError("请求只接受 id 和 action")
+                    with (run / "control.lock").open("a") as control:
+                        fcntl.flock(control, fcntl.LOCK_EX)
+                        if locked(run):
+                            raise ValueError("请暂停队列并等待退出后，再恢复或移除 Key")
+                        anysearch_key_pool.change_key(key_pool_file(), payload["id"], payload["action"])
+                    result = status(run, emit=False)
+                elif self.path == "/queue-start":
+                    if payload != {}:
+                        raise ValueError("续跑请求不接受参数")
+                    result = start(run, current_settings)
+                else:
+                    if payload != {}:
+                        raise ValueError("暂停请求不接受参数")
+                    save(run / "STOP", {"requested_at": now(), "source": "key-pool-ui"})
+                    result = status(run, emit=False)
             except _ResearchInputError as exc:
                 self._json(exc.status, {"message": exc.message})
             except ValueError as exc:
@@ -576,16 +695,17 @@ def key_ui_server(run, settings):
         def log_message(self, format, *args):
             pass  # Never log request bodies or credentials.
 
-    return HTTPServer(("127.0.0.1", 0), KeyHandler)
+    return HTTPServer(("127.0.0.1", port), KeyHandler)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("snapshot", "run", "apply", "start", "resume", "stop", "status", "key-ui"))
+    parser.add_argument("command", choices=("snapshot", "run", "apply", "start", "resume", "stop", "status", "key-ui", "policy-review"))
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--crm-env", type=Path)
     parser.add_argument("--workers", type=int)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--port", type=int, default=0, help="Local key management port (0 chooses a free port)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", dest="apply", action="store_true", default=None, help="Write validated proposals")
     mode.add_argument("--dry-run", dest="apply", action="store_false", help="Prepare proposals only")
@@ -621,6 +741,14 @@ def main():
     if configured_key:
         os.environ["ANYSEARCH_API_KEY"] = configured_key
     os.environ["ANYSEARCH_STOP_ON_QUOTA"] = "1"
+    if key_pool_file().exists():
+        os.environ["ANYSEARCH_KEY_POOL_FILE"] = str(key_pool_file())
+    if args.command == "policy-review":
+        manifest = read(args.run_dir / "manifest.json")
+        if manifest["target"] != target() or manifest["snapshot_sha256"] != hashlib.sha256((args.run_dir / "snapshot.json").read_bytes()).hexdigest():
+            raise ValueError("CRM target or immutable snapshot changed")
+        policy_review(args.run_dir, read(args.run_dir / "snapshot.json"))
+        return
     if args.command == "key-ui":
         with (args.run_dir / "key-ui.lock").open("a") as lock:
             try:
@@ -628,7 +756,7 @@ def main():
             except BlockingIOError:
                 print(json.dumps(read(args.run_dir / "key-ui.json")), flush=True)
                 return
-            with key_ui_server(args.run_dir, settings) as server:
+            with key_ui_server(args.run_dir, settings, args.port) as server:
                 info = {"url": f"http://127.0.0.1:{server.server_port}/", "pid": os.getpid(), "started_at": now()}
                 save(args.run_dir / "key-ui.json", info)
                 print(json.dumps(info), flush=True)

@@ -2,6 +2,8 @@
 
 本文用于在一台新的 macOS/Linux 机器上复现当前公司背调服务。目标不是“代码能启动”，而是让影响结果的仓库规则、Hermes 版本、模型配置、完整业务记忆、AnySearch 版本和调用方式全部一致。
 
+本次只随 Git 交付代码、测试及文档，不交付原机当前队列、运行结果、恢复快照或密钥。日常启动、Key 池、维护和嵌入宿主项目的完整入口见 [README](README.md)。
+
 ## 复现基线
 
 | 部件 | 固定值 | 验收依据 |
@@ -59,12 +61,12 @@ export PATH="$HOME/.local/bin:$PATH"
 ## 2. 克隆并锁定本仓库
 
 ```bash
-git clone --branch main https://github.com/Zzz0zzZ0/aceler-company-research-service.git
+git clone --branch codex/crm-enrichment-20260909 https://github.com/Zzz0zzZ0/aceler-company-research-service.git
 cd aceler-company-research-service
 git rev-parse HEAD
 ```
 
-以上获得当前 main。两台机器对照时，先在基准机器运行 `git rev-parse HEAD`，将其完整输出填入下方变量，再在新机器执行：
+以上获得本次交接分支（包含 CRM 队列、联系人保护和 Key 池）；较早的 main 不代表本次交接版本。两台机器对照时，先在基准机器运行 `git rev-parse HEAD`，将其完整输出填入下方变量，再在新机器执行：
 
 ```bash
 ACELER_REPRO_REF='替换为基准机器的完整提交号'
@@ -72,7 +74,7 @@ git checkout --detach "$ACELER_REPRO_REF"
 git status --short
 ```
 
-`git status --short` 应没有输出。后续所有命令默认在该仓库根目录执行。不要使用历史安装文档中的旧 tag 复现当前 main；项目提交号应随每次基准运行记录，不在安装脚本中写死。
+`git status --short` 应没有输出。后续所有命令默认在该仓库根目录执行。不要使用历史安装文档中的旧 tag 复现交接版本；项目提交号应随每次基准运行记录，不在安装脚本中写死。
 
 ## 3. 创建项目 Python 环境
 
@@ -82,7 +84,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-`psycopg` 只用于可选的 CRM 只读抽样，但安装固定 `requirements.txt` 能减少机器差异。
+`psycopg` 用于可选的 CRM 抽样与批量补充适配器，但安装固定 `requirements.txt` 能减少机器差异。
 
 ## 4. 安装固定版本 AnySearch
 
@@ -308,6 +310,12 @@ chmod 600 config/local.env
 
 只在同事本机填写所需连接值。该文件已被 Git 忽略。CRM 查询使用只读事务；不要把 CRM 当作完整事实源，也不要因为 CRM 字段缺失降低公司匹配分。
 
+## 12. 可选 CRM 写入与 Key 池
+
+先完成无 CRM 冒烟。需要批量补充时，再按 [README 的 CRM 启动步骤](README.md#crm新建批次) 配置数据库、冻结新清单并验证 dry-run。`--apply` 同时启用字段回填和低于 20 分公司标无效，保留联系人，不再删除公司。Key 池由本机 `scripts/crm-enrichment key-ui` 管理，最多 20 个 Key，全部耗尽才暂停。
+
+原机当前队列不通过 Git 迁移，不要在新机创建同范围写入批次与原机并跑。未来如单独安排迁移，按 [迁移说明](README.md#迁移到另一台-mac) 处理完整批次、独立密钥传输、本机依赖和绝对路径。
+
 ## 常见偏差与定位
 
 ### 同事准确率明显低于基准
@@ -374,7 +382,7 @@ grep -Eq '^MINIMAX_CN_API_KEY=.+$' \
 可将下面整段发给对方的 Codex：
 
 ```text
-请在一个新目录克隆 https://github.com/Zzz0zzZ0/aceler-company-research-service 的 main，并按当前 INSTALL-CODEX.md 安装。若提供基准机器的完整提交号，checkout 到同一提交，并把该提交号传给 scripts/verify-install.sh 验收；不要使用历史安装文档中的旧 tag。保留仓库完整 MEMORY 和 profile；服务会显式使用 MiniMax-M3 / minimax-cn，不需改动 profile 的兼容默认模型。不得修改 Skill、validator、检索、重试或评分规则。先做离线验收，只汇报版本、提交、哈希和测试结果，不输出密钥。离线通过后，按文档跑 1 家 Hatria 联网 smoke test 并核对实际 usage。不要连接或写入 CRM，不要发送消息，不要批量运行。若复现失败，保留原始结果并对照实际输入、外部 AnySearch 安装和本机代理；不要人工改判或扩大补跑。
+请在一个新目录克隆 https://github.com/Zzz0zzZ0/aceler-company-research-service 的 codex/crm-enrichment-20260909 分支，并按当前 INSTALL-CODEX.md 安装。若提供基准机器的完整提交号，checkout 到同一提交，并把该提交号传给 scripts/verify-install.sh 验收；不要使用历史安装文档中的旧 tag。保留仓库完整 MEMORY 和 profile；服务会显式使用 MiniMax-M3 / minimax-cn，不需改动 profile 的兼容默认模型。不得修改 Skill、validator、检索、重试或评分规则。先做离线验收，只汇报版本、提交、哈希和测试结果，不输出密钥。离线通过后，按文档跑 1 家 Hatria 联网 smoke test 并核对实际 usage。不要连接或写入 CRM，不要发送消息，不要批量运行。若复现失败，保留原始结果并对照实际输入、外部 AnySearch 安装和本机代理；不要人工改判或扩大补跑。
 ```
 
 ## 完成定义

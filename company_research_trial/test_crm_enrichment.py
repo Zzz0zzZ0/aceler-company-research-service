@@ -16,6 +16,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "crm_enrichment.py"
 SPEC = importlib.util.spec_from_file_location("crm_enrichment", SCRIPT)
 M = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(M)
+AUTOMATION_GATE = M.automation_gate
 MANIFEST = {"industries": {"TAO_CI": "陶瓷", "QI_TA": "其他"}}
 ROW = {"id": "test-company", "name": "Development Ceramics", "website": "https://example.test",
        "linkedin_url": None, "country": "UK", "background": "Existing verified information", "industry": None,
@@ -27,6 +28,64 @@ def proposal(changes):
 
 
 class EnrichmentTests(unittest.TestCase):
+    def setUp(self):
+        # Queue tests isolate scheduling from the separately tested CRM gate.
+        gate = patch.object(M, "automation_gate", return_value=None)
+        self.queue_gate = gate.start()
+        self.addCleanup(gate.stop)
+
+    def test_gate_blocks_invalid_and_higher_tier_without_research_or_writes(self):
+        for current, expected in [(("WU_XIAO", False, False), "blocked_invalid_company"),
+                                  (("WU_XIAO", True, False), "review_higher_tier_contacts"),
+                                  (("SAN_JI", True, False), "review_higher_tier_contacts"),
+                                  ((None, False, True), None),
+                                  (("SAN_JI", False, False), "no_longer_eligible"),
+                                  (None, "no_longer_eligible")]:
+            with self.subTest(current=current), tempfile.TemporaryDirectory() as temporary:
+                run = Path(temporary)
+                con, cur = self.connection({})
+                cur.fetchone.side_effect = [current]
+                with patch.object(M, "crm_connection", return_value=con), patch.dict(M.os.environ, {"TWENTY_WORKSPACE_SCHEMA": "workspace_test"}):
+                    self.assertEqual(AUTOMATION_GATE(ROW, 1, run), expected)
+                self.assertEqual(cur.execute.call_count, 3)
+                self.assertEqual(cur.execute.call_args_list[0].args[0], "BEGIN READ ONLY")
+                self.assertIn("IS DISTINCT FROM 'WU_XIAO'", cur.execute.call_args.args[0].as_string())
+                if expected:
+                    self.queue_gate.return_value = expected
+                    with patch.object(M, "prepare") as research, patch.object(M, "apply_one") as write, patch.object(M, "invalidate_low_fit") as invalidate:
+                        M.run_queue(run, MANIFEST, [ROW], 1, 0, True, False)
+                    research.assert_not_called(); write.assert_not_called(); invalidate.assert_not_called()
+                    self.assertEqual(M.read(run / "progress.json")["counts"], {expected: 1})
+
+    def test_blocked_entry_is_rechecked_after_company_is_reactivated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            self.queue_gate.return_value = "blocked_invalid_company"
+            with patch.object(M, "prepare") as prepare:
+                M.run_queue(run, MANIFEST, [ROW], 1, 0, False, False)
+                prepare.assert_not_called()
+            self.queue_gate.return_value = None
+            with patch.object(M, "prepare", return_value={"status": "review"}) as prepare:
+                M.run_queue(run, MANIFEST, [ROW], 1, 0, False, False)
+                prepare.assert_called_once()
+
+    def test_policy_review_audits_completed_companies_without_changing_pause(self):
+        con, cur = self.connection({})
+        cur.description = [SimpleNamespace(name=key) for key in
+                           ("id", "name", "level", "contacts", "higher_tier_contacts")]
+        cur.fetchall.return_value = [("invalid", "Invalid", "WU_XIAO", 3, 0),
+                                    ("review", "Review", "WU_XIAO", 2, 1)]
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "crm_connection", return_value=con), patch.dict(M.os.environ, {"TWENTY_WORKSPACE_SCHEMA": "workspace_test"}):
+            run = Path(temporary); (run / "STOP").write_text("paused")
+            result = M.policy_review(run, [ROW])
+            self.assertEqual(result["invalid_companies"], 2)
+            self.assertEqual([row["id"] for row in result["manual_review"]], ["review"])
+            self.assertFalse(result["contacts_changed"])
+            self.assertEqual((run / "STOP").read_text(), "paused")
+            self.assertEqual(cur.execute.call_count, 3)
+            self.assertEqual(cur.execute.call_args_list[0].args[0], "BEGIN READ ONLY")
+            self.assertEqual(cur.execute.call_args.args[1], ([ROW["id"]],))
+
     def test_meter_counts_individual_queries_and_retains_failed_attempts_on_resume(self):
         def simulated_research(seed, index, run):
             C.run_anysearch_cli(["batch_search", "--query", "identity", "--query", "products"])
@@ -106,8 +165,8 @@ class EnrichmentTests(unittest.TestCase):
         translate.assert_not_called()
         model.assert_not_called()
 
-    def test_soft_delete_and_commit_before_receipt_recovery(self):
-        current = {**ROW, "deleted_at": None, "eligible": True}
+    def test_invalidation_and_commit_before_receipt_recovery(self):
+        current = {**ROW, "level": "SAN_JI", "deleted_at": None, "eligible": True, "higher_tier_contacts": False}
         timestamp = "2026-09-10 03:00:00+00"
         connection, cursor = self.connection(current)
         cursor.fetchone.side_effect = [tuple(current.values()), (timestamp,), (timestamp,)]
@@ -115,49 +174,62 @@ class EnrichmentTests(unittest.TestCase):
             run = Path(temporary); directory = run / "records" / f"001-{ROW['id']}"
             M.save(directory / "result.json", self.low_item())
             with patch.object(M, "crm_connection", return_value=connection):
-                result = M.delete_low_fit(ROW, 1, run)
-            self.assertEqual(result["status"], "deleted_low_fit")
+                result = M.invalidate_low_fit(ROW, 1, run)
+            self.assertEqual(result["status"], "invalidated_low_fit")
             query, params = cursor.execute.call_args.args
-            self.assertIn('SET "deletedAt"=', query.as_string())
+            self.assertIn("SET level='WU_XIAO'", query.as_string())
+            self.assertNotIn('SET "deletedAt"', query.as_string())
             self.assertIn("NOT EXISTS", query.as_string())
             self.assertNotIn("DELETE FROM", query.as_string())
             self.assertEqual(params, (timestamp, ROW["id"]))
-            (directory / "deletion.json").unlink()  # DB committed; receipt lost
-            recovered, cur = self.connection({**current, "deleted_at": timestamp, "eligible": False})
+            (directory / "invalidation.json").unlink()  # DB committed; receipt lost
+            recovered, cur = self.connection({**current, "level": "WU_XIAO", "updated_at": timestamp})
             with patch.object(M, "crm_connection", return_value=recovered):
-                self.assertEqual(M.delete_low_fit(ROW, 1, run)["status"], "already_deleted_low_fit")
+                self.assertEqual(M.invalidate_low_fit(ROW, 1, run)["status"], "already_invalid_low_fit")
             self.assertEqual(cur.execute.call_count, 2)
-            with patch.object(M, "crm_connection", side_effect=AssertionError("repeated deletion")):
-                self.assertEqual(M.delete_low_fit(ROW, 1, run)["status"], "already_deleted_low_fit")
+            with patch.object(M, "crm_connection", side_effect=AssertionError("repeated invalidation")):
+                self.assertEqual(M.invalidate_low_fit(ROW, 1, run)["status"], "already_invalid_low_fit")
 
-    def test_deletion_preserves_failed_research_and_live_changes(self):
-        for change, expected in [({"industry": "QI_TA"}, "deletion_conflict"),
-                                 ({"eligible": False}, "deletion_scope_changed"),
-                                 ({"name": "Renamed"}, "deletion_identity_changed")]:
+    def test_invalidation_preserves_failed_research_and_live_changes(self):
+        for change, expected in [({"industry": "QI_TA"}, "invalidation_conflict"),
+                                 ({"eligible": False}, "invalidation_scope_changed"),
+                                 ({"higher_tier_contacts": True}, "review_higher_tier_contacts"),
+                                 ({"level": "ER_JI_XUN_PAN"}, "invalidation_level_conflict"),
+                                 ({"name": "Renamed"}, "invalidation_identity_changed")]:
             with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary, patch.dict(M.os.environ, {"TWENTY_WORKSPACE_SCHEMA": "workspace_test"}):
                 run = Path(temporary); directory = run / "records" / f"001-{ROW['id']}"
                 M.save(directory / "result.json", self.low_item())
-                con, cur = self.connection({**ROW, "deleted_at": None, "eligible": True, **change})
+                con, cur = self.connection({**ROW, "level": "SAN_JI", "deleted_at": None, "eligible": True, **change})
                 with patch.object(M, "crm_connection", return_value=con):
-                    self.assertEqual(M.delete_low_fit(ROW, 1, run)["status"], expected)
+                    self.assertEqual(M.invalidate_low_fit(ROW, 1, run)["status"], expected)
                 self.assertEqual(cur.execute.call_count, 2)
         with tempfile.TemporaryDirectory() as temporary, patch.object(M, "crm_connection") as db:
             run = Path(temporary)
             M.save(run / "records" / f"001-{ROW['id']}" / "result.json", {**self.low_item(), "status": "failed"})
             with self.assertRaises(ValueError):
-                M.delete_low_fit(ROW, 1, run)
+                M.invalidate_low_fit(ROW, 1, run)
             db.assert_not_called()
 
-    def test_previously_enriched_low_fit_is_processed_for_deletion(self):
+    def test_previously_enriched_low_fit_is_processed_for_invalidation(self):
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary); directory = run / "records" / f"001-{ROW['id']}"
             M.save(directory / "result.json", self.low_item())
             M.save(directory / "apply.json", {"status": "applied"})
-            with patch.object(M, "delete_low_fit", return_value={"status": "deleted_low_fit"}) as delete, patch.object(M, "prepare") as prepare:
+            with patch.object(M, "invalidate_low_fit", return_value={"status": "invalidated_low_fit"}) as delete, patch.object(M, "prepare") as prepare:
                 M.run_queue(run, MANIFEST, [ROW], 1, 0, True, False)
             delete.assert_called_once()
             prepare.assert_not_called()
-            self.assertEqual(M.read(run / "progress.json")["counts"], {"deleted_low_fit": 1})
+            self.assertEqual(M.read(run / "progress.json")["counts"], {"invalidated_low_fit": 1})
+
+    def test_restored_invalidation_receipt_supersedes_historical_deletion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary); directory = run / "records" / f"001-{ROW['id']}"
+            M.save(directory / "deletion.json", {"status": "deleted_low_fit"})
+            M.save(directory / "invalidation.json", {"status": "invalidated_low_fit"})
+            with patch.object(M, "invalidate_low_fit") as invalidate, patch.object(M, "prepare") as prepare:
+                M.run_queue(run, MANIFEST, [ROW], 1, 0, True, False)
+            invalidate.assert_not_called(); prepare.assert_not_called()
+            self.assertEqual(M.read(run / "progress.json")["counts"], {"invalidated_low_fit": 1})
 
     def test_quota_detection_distinguishes_limits_and_page_content(self):
         for message in ("API Error: You've reached your API key's total free quota for today.",
@@ -202,6 +274,7 @@ class EnrichmentTests(unittest.TestCase):
             M.check_changes(ROW, {"source": "AGENT1"}, MANIFEST)
 
     def connection(self, current, returned=None):
+        current = {**current, "higher_tier_contacts": current.get("higher_tier_contacts", False)}
         cursor = MagicMock()
         cursor.description = [SimpleNamespace(name=key) for key in current]
         cursor.fetchone.side_effect = [tuple(current.values()), returned]
@@ -223,7 +296,7 @@ class EnrichmentTests(unittest.TestCase):
                 self.assertEqual(M.apply_one(ROW, 1, run, MANIFEST, proposed), audit)
 
     def test_live_changes_and_ineligible_companies_are_not_overwritten(self):
-        for changed, expected in [({"industry": "QI_TA"}, "conflict"), ({"eligible": False}, "no_longer_eligible"), ({"website": "https://new.test"}, "identity_changed")]:
+        for changed, expected in [({"industry": "QI_TA"}, "conflict"), ({"eligible": False}, "no_longer_eligible"), ({"higher_tier_contacts": True}, "review_higher_tier_contacts"), ({"website": "https://new.test"}, "identity_changed")]:
             current = {**ROW, "eligible": True, **changed}
             connection, cursor = self.connection(current)
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary, patch.object(M, "crm_connection", return_value=connection), patch.dict(M.os.environ, {"TWENTY_WORKSPACE_SCHEMA": "workspace_test"}):
